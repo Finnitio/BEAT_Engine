@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "deploy_cpu.jl"))
 include(joinpath(@__DIR__, "deploy_rhs_policy.jl"))
 const DEPLOY_RHS_CALIBRATION = Ref{Any}(nothing)
 
@@ -560,8 +561,8 @@ function solve_deploy_request_impl(
         "Deploy burton_miller_assembly must be 'direct_system' or 'operator_matrices'.",
     )
     direct_cuda_assembly = beat_backend == :cuda && requested_assembly_mode == "direct_system"
-    rom_request && !direct_cuda_assembly && error(
-        "Deploy Level 3 parity ROM currently requires direct-system BEAT CUDA.",
+    rom_request && beat_backend == :cuda && !direct_cuda_assembly && error(
+        "Deploy Level 3 CUDA requires direct-system assembly.",
     )
     assembly_mode = direct_cuda_assembly ? "direct_system" : "operator_matrices"
     retain_geometry_cache = Bool(get_value(request, "retain_geometry_cache", false))
@@ -918,7 +919,43 @@ function solve_deploy_request_impl(
                 "Solving fixed-Neumann exterior system",
         )
         solve_seconds = @elapsed begin
-            pressure = if rom_request
+            pressure = if rom_request && beat_backend == :cpu
+                cpu_system = nothing
+                rom_factorization_seconds = @elapsed begin
+                    cpu_system = BeatEngineCore.build_burton_miller_neumann_cpu_system(
+                        operators, identity_p1_p1, identity_p1_dp0, k,
+                    )
+                end
+                preconditioned_rhs = nothing
+                rom_initial_preconditioner_seconds = @elapsed begin
+                    preconditioned_rhs = BeatEngineCore.solve_burton_miller_neumann_cpu_system(
+                        cpu_system, q_neumann, FloatType,
+                    )
+                end
+                apply_schur = function(candidate)
+                    feedback = deploy_speaker_rom_response(speaker_rom, candidate; include_drive=false)
+                    response = BeatEngineCore.solve_burton_miller_neumann_cpu_system(
+                        cpu_system, feedback.q, FloatType,
+                    )
+                    return candidate - response
+                end
+                gmres_result = nothing
+                rom_gmres_seconds = @elapsed begin
+                    gmres_result = deploy_cpu_gmres(
+                        apply_schur, preconditioned_rhs;
+                        tolerance=speaker_rom.tolerance,
+                        max_iterations=speaker_rom.max_iterations,
+                        initial_guess=rom_initial_pressure,
+                    )
+                end
+                (rom_pressure, rom_iterations, rom_residual, rom_residual_history,
+                 rom_operator_applications, rom_initial_relative_residual) = gmres_result
+                rom_final_response_seconds = @elapsed begin
+                    final_rom_response = deploy_speaker_rom_response(speaker_rom, rom_pressure; include_drive=true)
+                end
+                cached_q_neumann = final_rom_response.q
+                rom_pressure
+            elseif rom_request
                 cuda = BeatEngineCore.CUDA_MODULE
                 rom_factorization_seconds = @elapsed begin
                     rom_factorization = lu!(direct_system.matrix)
