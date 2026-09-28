@@ -1,3 +1,5 @@
+include(joinpath(@__DIR__, "..", "src", "BeatEngineInterfaceRadiation.jl"))
+using .BeatEngineInterfaceRadiation
 include(joinpath(@__DIR__, "..", "src", "BeatEngineCoupled.jl"))
 using .BeatEngineCoupled
 # The Metal gate below exercises the production condensing route, which is the
@@ -560,6 +562,7 @@ if get(ENV, "BLAB_RUN_COUPLED_REFERENCE", "0") == "1"
             quadrature_order=COUPLED_QUADRATURE_ORDER,
             singular_order=COUPLED_SINGULAR_ORDER,
             bulk_loss_factor=bulk_loss_factor,
+            retain_interface_radiation=true,
             prescribed_bem_normal_velocity=prescribed_bem_normal_velocity,
         )
         expected_fem_system = assemble_fem_dynamic_stiffness(
@@ -582,6 +585,21 @@ if get(ENV, "BLAB_RUN_COUPLED_REFERENCE", "0") == "1"
         @test solution.pressure_continuity_error < 1e-8
         @test solution.flux_conservation_error < 1e-10
         @test solution.all_bem_replay_error < 1e-8
+        # Partition the nonuniform interface DOFs into two contributions. Their
+        # scattered fields must reconstruct the coupled field without averaging.
+        interface_dof_count = length(solution.interface_flux)
+        ranges = [1:2:interface_dof_count, 2:2:interface_dof_count]
+        traces = interface_radiation_traces(coupled_system, solution, ranges)
+        @test traces.reconstruction_error < 1e-8
+        @test isapprox(vec(sum(traces.normal_derivative; dims=2)), solution.bem_neumann)
+        @test isapprox(vec(sum(traces.pressure; dims=2)), solution.bem_pressure; rtol=1e-8)
+        # Source order and zero excitation are preserved.
+        reversed_traces = interface_radiation_traces(coupled_system, solution, reverse(ranges))
+        @test isapprox(reversed_traces.pressure, traces.pressure[:, end:-1:1])
+        zero_solution = merge(solution, (interface_flux=zero.(solution.interface_flux),
+            bem_pressure=zero.(solution.bem_pressure), bem_neumann=zero.(solution.bem_neumann)))
+        @test iszero(norm(interface_radiation_traces(coupled_system, zero_solution, ranges).pressure))
+
 
         bem_solution = only(
             solve_coupled_excitations(
@@ -607,6 +625,13 @@ if get(ENV, "BLAB_RUN_COUPLED_REFERENCE", "0") == "1"
         @test bem_solution.pressure_continuity_error < 1e-8
         @test bem_solution.flux_conservation_error < 1e-10
         @test bem_solution.all_bem_replay_error < 1e-8
+        mixed = interface_radiation_traces(coupled_system, bem_solution, ranges; include_other=true)
+        @test size(mixed.pressure, 2) == 3
+        @test norm(mixed.pressure[:, end]) > 0
+        @test isapprox(vec(sum(mixed.pressure; dims=2)), bem_solution.bem_pressure)
+        @test isapprox(vec(sum(mixed.normal_derivative; dims=2)), bem_solution.bem_neumann)
+        @test mixed.reconstruction_error < 1e-12
+
 
         fem_mesh32 = load_gmsh41_volume(
             joinpath(COUPLED_FIXTURE_ROOT, "femvolume.msh"),

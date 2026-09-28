@@ -1629,6 +1629,7 @@ function build_condensed_coupled_system(
     singular_order::Int=2,
     cache=nothing,
     validation_diagnostics::Bool=false,
+    retain_interface_radiation::Bool=false,
     symmetry_mode::Symbol=:off,
     bulk_loss_factor::T=zero(T),
     bulk_loss_factor_by_vertex=nothing,
@@ -1902,6 +1903,12 @@ function build_condensed_coupled_system(
     bem_prescribed_rhs = prescribed_bem_count == 0 ?
                          zeros(Complex{T}, length(bem_mesh.vertices), 0) :
                          Complex{T}.(bem_rhs_operator * bem_prescribed_neumann)
+    # Replay the frozen operating flux without changing the coupled state.
+    # Preserve host matrices before accelerator assembly storage is released.
+    interface_radiation_replay = retain_interface_radiation ? (
+        factorization=lu(Array(bem_lhs)),
+        interface_block=Array(bem_interface_block),
+    ) : nothing
     bem_matrix_s = (time_ns() - bem_matrix_started) / 1.0e9
 
     stage_overlap || (condensation_started = time_ns())
@@ -2180,6 +2187,7 @@ function build_condensed_coupled_system(
         bem_lhs=nothing,
         bem_factorization=nothing,
         bem_rhs_operator=nothing,
+        interface_radiation_replay=interface_radiation_replay,
         prescribed_bem_rhs=bem_prescribed_rhs,
         prescribed_bem_neumann=bem_prescribed_neumann,
         bem_backend=prepared.bem_backend,

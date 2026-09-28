@@ -2031,6 +2031,7 @@ function build_coupled_system(
     singular_order::Int=2,
     cache=nothing,
     validation_diagnostics::Bool=true,
+    retain_interface_radiation::Bool=false,
     bem_backend::Symbol=:cpu,
     symmetry_mode::Symbol=:off,
     static_condensation::Bool=false,
@@ -2243,6 +2244,12 @@ function build_coupled_system(
     bem_prescribed_rhs = isnothing(bem_blocks.bem_prescribed_rhs) ?
                          zeros(Complex{T}, length(bem_mesh.vertices), 0) :
                          Complex{T}.(Array(bem_blocks.bem_prescribed_rhs))
+    # Replay the frozen operating flux without changing the coupled state.
+    # Preserve host matrices before accelerator assembly storage is released.
+    interface_radiation_replay = retain_interface_radiation ? (
+        factorization=lu(Array(bem_lhs)),
+        interface_block=Array(bem_blocks.bem_interface_block),
+    ) : nothing
     bem_matrix_s = (time_ns() - bem_matrix_started) / 1.0e9
 
     condensation_started = time_ns()
@@ -2521,6 +2528,7 @@ function build_coupled_system(
         bem_lhs=validation_diagnostics ? bem_lhs : nothing,
         bem_factorization=bem_factorization,
         bem_rhs_operator=validation_diagnostics ? bem_rhs_operator : nothing,
+        interface_radiation_replay=interface_radiation_replay,
         prescribed_bem_rhs=bem_prescribed_rhs,
         prescribed_bem_neumann=bem_prescribed_neumann,
         bem_backend=bem_backend,

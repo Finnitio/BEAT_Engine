@@ -194,3 +194,11 @@ def test_reclamation_requires_advertisement_but_no_result_contract(ready):
         negotiate_submission(ready, {}, "reclaim")
     ready["operations"].append("reclaim")
     assert negotiate_submission(ready, {}, "reclaim") == {"protocol_version": 1}
+
+
+def test_interface_radiation_requires_advertised_output(ready, payload):
+    payload["outputs"][0]["quantity"] = "interface_radiated_pressure"
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+    ready["optional_output_quantities"].remove("interface_radiated_pressure")
+    with pytest.raises(WorkerCompatibilityError, match="interface radiation"):
+        negotiate_submission(ready, payload, "solve")

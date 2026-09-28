@@ -53,7 +53,8 @@
     "exp(+i omega t)"
   ],
   "optional_output_quantities": [
-    "interface_average_normal_velocity"
+    "interface_average_normal_velocity",
+    "interface_radiated_pressure"
   ],
   "request_transports": [
     "file",

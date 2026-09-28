@@ -19,6 +19,8 @@ using .BeatEngineSpeakerRom
 
 include(joinpath(@__DIR__, "src", "BeatEngineInterfaceVelocity.jl"))
 using .BeatEngineInterfaceVelocity
+include(joinpath(@__DIR__, "src", "BeatEngineInterfaceRadiation.jl"))
+using .BeatEngineInterfaceRadiation
 
 const DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V = 2.83
 const RUN_MESH_PROVENANCE = Ref{Any}([])
@@ -58,6 +60,7 @@ const INTERIOR_FREE_COUPLED_OUTPUTS = Set([
     "bem_boundary_pressure",
     "bem_boundary_neumann",
     "interface_average_normal_velocity",
+    "interface_radiated_pressure",
     "interface_normal_derivative",
     "diaphragm_velocity",
     "voice_coil_current",
@@ -2411,6 +2414,16 @@ function solve_request_impl(request; event_mode=false)
 
     bounded_regions = [region for region in regions if String(region["kind"]) == "bounded_air"]
     unbounded_regions = [region for region in regions if String(region["kind"]) == "unbounded_air"]
+    for output in get(request, "outputs", Any[])
+        if String(output["quantity"]) == "interface_radiated_pressure"
+            (!isempty(interfaces) && !isempty(bounded_regions) && !isempty(unbounded_regions)) ||
+                error("Interface radiation requires a coupled system with FEM-BEM interfaces.")
+            points = get(get(output, "options", Dict{String,Any}()), "points_m", Any[])
+            (!isempty(points) && all(point -> point isa AbstractVector && length(point) == 3 &&
+                all(value -> value isa Real && !(value isa Bool) && isfinite(value), point), points)) ||
+                error("Interface radiation requires finite observation points with shape (point, 3).")
+        end
+    end
     isempty(unbounded_regions) && return solve_interior_request(
         request,
         system,
@@ -2775,6 +2788,11 @@ function solve_request_impl(request; event_mode=false)
     rom_requested = any(
         String(output["quantity"]) in SPEAKER_ROM_QUANTITIES for output in outputs
     )
+    radiation_requested = any(String(output["quantity"]) == "interface_radiated_pressure" for output in outputs)
+    # Keep source IDs stable when an excitation subset leaves an exterior source
+    # silent, or its motion projection happens to be zero.
+    radiation_has_other = any(boundary -> String(boundary["region_id"]) == String(unbounded_region["id"]) &&
+        String(boundary["kind"]) == "moving", boundaries)
     coupled_system = nothing
     try
         for (frequency_index, frequency_value) in enumerate(request["frequencies_hz"])
@@ -2798,6 +2816,7 @@ function solve_request_impl(request; event_mode=false)
                     singular_order=singular_order,
                     cache=coupled_cache,
                     validation_diagnostics=validation_diagnostics,
+                    retain_interface_radiation=radiation_requested,
                     symmetry_mode=symmetry_mode,
                     bulk_loss_factor_by_vertex=fem_domains.bulk_loss_factor_by_vertex,
                     wall_impedances=fem_domains.wall_impedances,
@@ -2820,6 +2839,7 @@ function solve_request_impl(request; event_mode=false)
                     singular_order=singular_order,
                     cache=coupled_cache,
                     validation_diagnostics=validation_diagnostics,
+                    retain_interface_radiation=radiation_requested,
                     bem_backend=bem_backend,
                     symmetry_mode=symmetry_mode,
                     static_condensation=static_condensation,
@@ -2889,6 +2909,12 @@ function solve_request_impl(request; event_mode=false)
             else
                 nothing
             end
+            radiation_started = time_ns()
+            radiation_traces = radiation_requested ? [
+                interface_radiation_traces(coupled_system, solution, combined_interfaces.ranges;
+                    include_other=radiation_has_other) for solution in solutions
+            ] : nothing
+            field_s += (time_ns() - radiation_started) / 1.0e9
             for output in outputs
                 quantity = String(output["quantity"])
                 if quantity == "fem_nodal_pressure"
@@ -3038,6 +3064,40 @@ function solve_request_impl(request; event_mode=false)
                             ),
                         ),
                     )
+                elseif quantity == "interface_radiated_pressure"
+                    field_started = time_ns()
+                    options = get(output, "options", Dict{String,Any}())
+                    raw_points = get(options, "points_m", Any[])
+                    isempty(raw_points) && error("interface_radiated_pressure requires points_m.")
+                    points = [SVector{3,FloatType}(FloatType.(point)) for point in raw_points]
+                    ids = [String(interface["id"]) for interface in interfaces]
+                    names = [String(get(interface, "name", interface["id"])) for interface in interfaces]
+                    if radiation_has_other
+                        push!(ids, "radiation:other-exterior")
+                        push!(names, "Other exterior sources")
+                    end
+                    push!(ids, "radiation:total")
+                    push!(names, "Combined")
+                    values = zeros(Complex{FloatType}, length(solutions), length(ids), length(points))
+                    for (excitation_index, solution) in enumerate(solutions)
+                        traces = radiation_traces[excitation_index]
+                        for index in Base.axes(traces.pressure, 2)
+                            values[excitation_index, index, :] = exterior_field(points, bem_mesh,
+                                traces.pressure[:, index], traces.normal_derivative[:, index],
+                                coupled_system.wavenumber, coupled_system.field_cache, bem_backend)
+                        end
+                        values[excitation_index, end, :] = exterior_field(points, bem_mesh,
+                            solution.bem_pressure, solution.bem_neumann, coupled_system.wavenumber,
+                            coupled_system.field_cache, bem_backend)
+                    end
+                    push!(quantities, quantity_wire(output, values, "Pa",
+                        ["excitation", "radiation_source", "observation"], metadata=Dict(
+                            "radiation_source_ids" => ids, "radiation_source_names" => names,
+                            "interface_ids" => [String(interface["id"]) for interface in interfaces],
+                            "points_m" => raw_points, "decomposition" => "fixed_operating_flux_full_exterior_replay",
+                            "amplitude_convention" => "rms",
+                        )))
+                    field_s += (time_ns() - field_started) / 1.0e9
                 elseif quantity == "exterior_pressure"
                     field_started = time_ns()
                     options = get(output, "options", Dict{String,Any}())
@@ -3223,6 +3283,8 @@ function solve_request_impl(request; event_mode=false)
             diagnostics = Dict{String,Any}(
                 "precision" => precision_name,
                 "bem_backend" => String(bem_backend),
+                "interface_radiation_boundary_reconstruction_relative_error" => radiation_requested ?
+                    [t.reconstruction_error for t in radiation_traces] : nothing,
                 "coupled_bem_assembly" => hasproperty(coupled_system, :coupled_bem_assembly) ? String(coupled_system.coupled_bem_assembly) : "operators",
                 "coupled_bem_image_fusion" => hasproperty(coupled_system, :coupled_bem_image_fusion) && coupled_system.coupled_bem_image_fusion,
                 "coupled_bem_max_registers" => hasproperty(coupled_system, :coupled_bem_max_registers) ? coupled_system.coupled_bem_max_registers : 0,
