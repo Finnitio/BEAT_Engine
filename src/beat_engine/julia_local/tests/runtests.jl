@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "deploy_cpu_tests.jl"))
 using Test
 using StaticArrays
 using LinearAlgebra
