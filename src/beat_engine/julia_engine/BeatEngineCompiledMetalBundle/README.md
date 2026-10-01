@@ -68,3 +68,12 @@ No numerical kernel or launch sequence is changed. Native AOT versus JIT host
 code can differ at Float32 round-off; compare complete complex outputs and the
 unmodified engine's repeatability. `BLAB_BEAT_ENGINE_BUNDLE=0` selects the
 existing include fallback for diagnosis.
+
+`MetalRuntimePrecompile.jl` adds first-request specializations observed on
+multiple exterior workloads, including wire validation/cleanup, asynchronous
+assembly, and Metal argument encoding. Its types are evaluated only inside the
+compile workload; the host gate checks that every signature still matches.
+Compiler-generated types are resolved structurally (by captured fields or
+`Base.bodyfunction`), never by their generated names, which change between
+Julia releases. Retrace the inventory after Julia, engine or Metal-stack
+changes.

@@ -100,6 +100,7 @@ end
 
 include("MetalKernelPrecompile.jl")
 include("MetalHostPrecompile.jl")
+include("MetalRuntimePrecompile.jl")
 
 function __init__()
     # The host workload records provenance while building the package image.
@@ -113,7 +114,7 @@ end
 
 include(joinpath(@__DIR__, "..", "..", "CompiledExteriorWorkload.jl"))
 
-@compile_workload begin
+function precompile_workload()
     # One compiled exterior request per symmetry mode, through the same
     # `solve_request(...; event_mode=true)` the worker loop calls. The CPU
     # backend builds the host call graph without a GPU launch. The device
@@ -140,7 +141,9 @@ include(joinpath(@__DIR__, "..", "..", "CompiledExteriorWorkload.jl"))
     end
     precompile(run_worker, ())
     precompile_metal_host_signatures()
+    precompile_metal_runtime_signatures()
     precompile_metal_kernel_signatures()
 end
+@compile_workload precompile_workload()
 
 end

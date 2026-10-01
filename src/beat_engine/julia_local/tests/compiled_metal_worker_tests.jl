@@ -1,9 +1,22 @@
 using Test, JSON
 import BeatEngineCompiledMetalBundle
 
+@testset "Metal runtime inventory follows Channel's task wrapper" begin
+    wrapper = BeatEngineCompiledMetalBundle.metal_channel_task_wrapper_type()
+    @test fieldnames(Base.unwrap_unionall(wrapper)) == (:func, :chnl)
+    taskref = Ref{Task}()
+    Channel{Tuple{Int64,Any}}(_ -> nothing; taskref)
+    @test Base.typename(typeof(taskref[].code)).wrapper === wrapper
+end
+
 @testset "Metal host workload has matching compile-only methods" begin
     signatures = BeatEngineCompiledMetalBundle.metal_host_signatures()
     @test !isempty(signatures)
+    runtime_signatures = BeatEngineCompiledMetalBundle.metal_runtime_signatures()
+    @test !isempty(runtime_signatures)
+    for signature in runtime_signatures
+        @test precompile(signature)
+    end
     for (f, args) in signatures
         @test precompile(f, args)
     end
