@@ -21,6 +21,7 @@ include(joinpath(@__DIR__, "src", "BeatEngineInterfaceVelocity.jl"))
 using .BeatEngineInterfaceVelocity
 include(joinpath(@__DIR__, "src", "BeatEngineInterfaceRadiation.jl"))
 using .BeatEngineInterfaceRadiation
+include(joinpath(@__DIR__, "exterior_rhs_policy.jl"))
 
 const DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V = 2.83
 const RUN_MESH_PROVENANCE = Ref{Any}([])
@@ -774,46 +775,64 @@ function exterior_field(points, mesh, pressure, neumann, wavenumber, cache, back
     return evaluate_galerkin_field_cpu(points, mesh, pressure, neumann, wavenumber, cache)
 end
 
+# Device memory the next allocation can use: free device memory plus what
+# CUDA.jl's pool holds without using it, which it hands out before growing.
+# The pool counters are `missing` on devices without stream-ordered allocation.
+function exterior_cuda_available_bytes(cuda)
+    available = Int(cuda.free_memory())
+    if isdefined(cuda, :cached_memory) && isdefined(cuda, :used_memory)
+        try
+            cached, used = cuda.cached_memory(), cuda.used_memory()
+            cached isa Integer && used isa Integer && (available += max(cached - used, 0))
+        catch
+            # Free device memory alone understates what is available; the
+            # policy then falls back to integrating each excitation.
+        end
+    end
+    return available
+end
+
 function solve_exterior_direct_cuda(
-    mesh, p1_space, dp0_space, neumann_values, wavenumber, rule; kwargs...,
+    mesh, p1_space, dp0_space, neumann_values, wavenumber, rule; rhs_mode="auto", kwargs...,
 )
     # Deploy's direct assembler forms A and b without materializing S, D, D' or H.
-    # Keep one pivoted factorization for all independently retained excitations.
+    # Keep one pivoted factorization for all independently retained excitations;
+    # `exterior_rhs_policy.jl` chooses how their right-hand sides are integrated.
     cuda = BeatEngineCore.CUDA_MODULE
-    system = factorization = device_neumann = rhs = pressure = nothing
-    rhs_columns = Any[]
+    system = factorization = device_neumann = pressure = nothing
     try
         assembly_started = time_ns()
-        device_neumann = cuda.CuArray(first(neumann_values))
-        system = assemble_burton_miller_neumann_system_cuda(
+        excitation_count = length(neumann_values)
+        device_neumann = cuda.CuArray(reduce(hcat, neumann_values))
+        p1_count = p1_space.global_dof_count
+        entry_bytes = sizeof(Complex{typeof(wavenumber)})
+        use_operator = exterior_use_rhs_operator(
+            rhs_mode,
+            excitation_count,
+            entry_bytes * p1_count * p1_count,
+            entry_bytes * p1_count * dp0_space.global_dof_count,
+            exterior_cuda_available_bytes(cuda),
+        )
+        system = assemble_burton_miller_neumann_system_columns_cuda(
             mesh, p1_space, dp0_space, device_neumann, wavenumber, rule;
+            rhs_mode=use_operator ? :cached_operator : :matrix_free,
             identity_p1_p1_block=Tuple(BeatEngineCore.l2_identity_element_matrix(
                 one(wavenumber), :p1, :p1, rule,
             )),
             kwargs...,
         )
-        for neumann in Iterators.drop(neumann_values, 1)
-            copyto!(device_neumann, neumann)
-            push!(rhs_columns, assemble_burton_miller_rhs_cuda(
-                mesh, p1_space, dp0_space, device_neumann, wavenumber, rule; kwargs...,
-            ))
-        end
-        rhs = isempty(rhs_columns) ? system.rhs : hcat(system.rhs, rhs_columns...)
         cuda.synchronize()
         assembly_s = (time_ns() - assembly_started) / 1.0e9
         solve_started = time_ns()
         factorization = lu!(system.matrix)
-        pressure = factorization \ rhs
-        host_pressure = reshape(Array(pressure), p1_space.global_dof_count, length(neumann_values))
+        pressure = factorization \ system.rhs
+        host_pressure = reshape(Array(pressure), p1_count, excitation_count)
         pressures = [copy(column) for column in eachcol(host_pressure)]
         solve_s = (time_ns() - solve_started) / 1.0e9
-        return pressures, assembly_s, solve_s
+        rhs = (mode=String(system.rhs_mode), operator_bytes=system.rhs_operator_bytes)
+        return pressures, assembly_s, solve_s, rhs
     finally
         pressure === nothing || cuda.unsafe_free!(pressure)
-        (rhs === nothing || (system !== nothing && rhs === system.rhs)) || cuda.unsafe_free!(rhs)
-        for column in rhs_columns
-            cuda.unsafe_free!(column)
-        end
         factorization === nothing || cuda.unsafe_free!(factorization.ipiv)
         system === nothing || release_burton_miller_system_cuda!(system)
         device_neumann === nothing || cuda.unsafe_free!(device_neumann)
@@ -879,6 +898,9 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
         "Exterior burton_miller_assembly must be direct_system or operator_matrices.",
     )
     direct_cuda_assembly = backend == :cuda && requested_assembly == "direct_system"
+    # Worker-environment override for comparisons; see exterior_rhs_policy.jl.
+    exterior_rhs_requested_mode = direct_cuda_assembly ?
+        exterior_rhs_mode(get(ENV, "BEAT_EXTERIOR_RHS_MODE", "auto")) : "auto"
     # Metal's direct assembler is the fused Burton-Miller path: A and every
     # excitation's b are formed on the GPU without the four operators, and the
     # host factorizes once. It exists only for the native singular and
@@ -1086,9 +1108,11 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
             neumann_values = [exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
             operators = nothing
             metal_solve_method = :lu
+            exterior_rhs = nothing
             if direct_cuda_assembly
-                pressures, assembly_s, solve_s = solve_exterior_direct_cuda(
+                pressures, assembly_s, solve_s, exterior_rhs = solve_exterior_direct_cuda(
                     mesh, p1_space, dp0_space, neumann_values, wavenumber, rule;
+                    rhs_mode=exterior_rhs_requested_mode,
                     device_cache=device_cache,
                     singular_cache=singular_cache,
                     device_singular_cache=device_singular_cache,
@@ -1265,6 +1289,11 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                     "cache_setup_s" => 0.0,
                 ),
             )
+            if exterior_rhs !== nothing
+                diagnostics["exterior_rhs_requested_mode"] = exterior_rhs_requested_mode
+                diagnostics["exterior_rhs_mode"] = exterior_rhs.mode
+                diagnostics["exterior_rhs_operator_bytes"] = exterior_rhs.operator_bytes
+            end
             if overlap_plan !== nothing
                 diagnostics["metal_pipeline"] = metal_pipeline
                 diagnostics["metal_pipeline_reason"] = String(overlap_plan.reason)
