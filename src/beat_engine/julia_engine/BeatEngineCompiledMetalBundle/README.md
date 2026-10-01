@@ -5,6 +5,23 @@ package includes the production driver and engine; its CPU workload caches the
 host call graph without an engine GPU launch. CPU uses its existing compiled
 bundle; CUDA and ROCm compiled workers retain the include fallback.
 
+Both compiled bundles decode workload requests through `JSON.parse`, matching
+the worker's `JSON.Object` specialization. Alongside the tetrahedron they solve
+a quadrant plate with non-adjacent and image-singular pairs, xy symmetry,
+1/20 kHz, order-4 rules, a 37-by-72 sphere, a diagonal cut and boundary traces.
+`CompiledExteriorWorkload.jl` keeps that representative request shared.
+
+`MetalHostPrecompile.jl` additionally calls `precompile(f, argtypes)` for the
+Float32 native exterior path: fused assembly and gather orchestration, host
+launch methods, array construction/conversion, shared-buffer wrapping, dense
+solve glue, field evaluation and sweep planning/consumption. It evaluates
+concrete types without creating device arrays or executing those methods.
+Launch types reuse the generated kernel inventory, restoring the private
+temporary and shared destination storage modes used by the production path.
+The host workload logs successes and failures; the host test checks every
+signature has a compilable method. Other precisions, storage overrides and
+diagnostic assembly paths can still need runtime compilation.
+
 Metal 1.11.1 and its resolved GPUCompiler 2.9.0 stack can persist compiled
 device code in Julia package images. `MetalKernelPrecompile.jl` calls
 `Metal.mtlfunction(f, TT)` inside `@compile_workload`, compiling and linking each

@@ -1,4 +1,13 @@
 using Test, JSON
+import BeatEngineCompiledMetalBundle
+
+@testset "Metal host workload has matching compile-only methods" begin
+    signatures = BeatEngineCompiledMetalBundle.metal_host_signatures()
+    @test !isempty(signatures)
+    for (f, args) in signatures
+        @test precompile(f, args)
+    end
+end
 
 @testset "compiled Metal worker uses its bundle" begin
     # Load the actual entry point in a fresh process without preloading the

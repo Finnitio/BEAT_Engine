@@ -35,9 +35,8 @@ end
 
 include(joinpath(ENGINE_DIR, "BeatEngineCompiledDriver.jl"))
 
-#: A closed tetrahedron with every face tagged 2 (symmetry off), and the
-#: quarter of it that survives when the x=0 and y=0 faces are dropped
-#: (symmetry xy). Nothing the workload compiles depends on the geometry.
+# A closed tetrahedron with every face tagged 2 (symmetry off). The second
+# workload is a quadrant plate, defined in the shared workload helper.
 const WORKLOAD_NODES = """
 \$Nodes
 4
@@ -63,13 +62,6 @@ const WORKLOAD_MESH_OFF = WORKLOAD_HEAD * WORKLOAD_NODES * """
 2 2 2 2 2 1 2 4
 3 2 2 2 2 2 3 4
 4 2 2 2 2 3 1 4
-\$EndElements
-"""
-const WORKLOAD_MESH_XY = WORKLOAD_HEAD * WORKLOAD_NODES * """
-\$Elements
-2
-1 2 2 2 2 1 3 2
-2 2 2 2 2 2 3 4
 \$EndElements
 """
 
@@ -107,6 +99,7 @@ function workload_request(mesh, symmetry)
 end
 
 include("MetalKernelPrecompile.jl")
+include("MetalHostPrecompile.jl")
 
 function __init__()
     # The host workload records provenance while building the package image.
@@ -118,6 +111,8 @@ function __init__()
     RUN_MESH_PROVENANCE[] = Any[]
 end
 
+include(joinpath(@__DIR__, "..", "..", "CompiledExteriorWorkload.jl"))
+
 @compile_workload begin
     # One compiled exterior request per symmetry mode, through the same
     # `solve_request(...; event_mode=true)` the worker loop calls. The CPU
@@ -126,16 +121,17 @@ end
     # launching an engine kernel during precompilation can hang the build.
     directory = mktempdir()
     try
-        for (name, text, symmetry) in (("off.msh", WORKLOAD_MESH_OFF, "off"), ("xy.msh", WORKLOAD_MESH_XY, "xy"))
+        for (name, text, symmetry) in (("off.msh", WORKLOAD_MESH_OFF, "off"), ("xy.msh", workload_plate_mesh(), "xy"))
             mesh = joinpath(directory, name)
             write(mesh, text)
-            request = JSON.parse(JSON.json(workload_request(mesh, symmetry)))
+            # Match JSON.parse in run_worker, including nested JSON.Object values.
+            request = JSON.parse(JSON.json(symmetry == "xy" ?
+                representative_workload_request(mesh) : workload_request(mesh, symmetry)))
             redirect_stdout(devnull) do
                 try
                     solve_request(request; event_mode=true)
-                catch
-                    # A workload that cannot solve still leaves everything it
-                    # reached compiled; a build must not fail over an optimisation.
+                catch exception
+                    @warn "BEAT compiled exterior workload failed" symmetry exception=(exception, catch_backtrace())
                 end
             end
         end
@@ -143,6 +139,7 @@ end
         rm(directory; force=true, recursive=true)
     end
     precompile(run_worker, ())
+    precompile_metal_host_signatures()
     precompile_metal_kernel_signatures()
 end
 
