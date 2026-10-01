@@ -12,8 +12,6 @@ checkout, or an unresolved bundle fall back to including the driver from source
 (same code, compiled from source again).
 """
 
-using JSON
-
 const BEAT_COMPILED_BUNDLE_NAME = let
     hint = lowercase(strip(get(ENV, "BLAB_BEAT_ENGINE_GPU_BACKEND", "")))
     if isempty(hint)
@@ -27,6 +25,19 @@ const BEAT_COMPILED_BUNDLE_NAME = let
     hint == "metal" ? :BeatEngineCompiledMetalBundle :
         hint == "cpu" ? :BeatEngineCompiledCpuBundle : nothing
 end
+
+# Match the compiled Metal bundle's dependency load order. Loading JSON first
+# invalidates its cached run_worker call graph when Metal's extensions load.
+# Other backends and the explicit include fallback retain their existing order.
+if BEAT_COMPILED_BUNDLE_NAME === :BeatEngineCompiledMetalBundle && get(ENV, "BLAB_BEAT_ENGINE_BUNDLE", "1") != "0"
+    try
+        @eval import Metal
+    catch
+        # An unresolved environment still takes the existing fallback below.
+    end
+end
+
+using JSON
 
 const BEAT_COMPILED_BUNDLE = if get(ENV, "BLAB_BEAT_ENGINE_BUNDLE", "1") == "0" || BEAT_COMPILED_BUNDLE_NAME === nothing
     nothing

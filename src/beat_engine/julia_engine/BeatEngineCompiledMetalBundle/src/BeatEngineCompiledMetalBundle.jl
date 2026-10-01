@@ -16,6 +16,7 @@ the one a solve runs in.
 module BeatEngineCompiledMetalBundle
 
 using PrecompileTools: @compile_workload
+import Metal
 
 const BEAT_ENGINE_BACKEND = "metal"
 
@@ -105,12 +106,24 @@ function workload_request(mesh, symmetry)
     )
 end
 
+include("MetalKernelPrecompile.jl")
+
+function __init__()
+    # The host workload records provenance while building the package image.
+    # File identities, thread counts and mesh paths belong to the new worker,
+    # not the precompile process.
+    provenance = BeatEngineContract.BeatEngineProvenance
+    provenance.IDENTITY[] = nothing
+    provenance.RUNTIME[] = nothing
+    RUN_MESH_PROVENANCE[] = Any[]
+end
+
 @compile_workload begin
     # One compiled exterior request per symmetry mode, through the same
     # `solve_request(...; event_mode=true)` the worker loop calls. The CPU
-    # backend even in a GPU bundle, as in BeatEngineCpuBundle: it needs no
-    # device on the build machine, and GPU kernel compilation cannot be
-    # disk-cached anyway.
+    # backend builds the host call graph without a GPU launch. The device
+    # workload below compiles and links kernels into the pkgimage separately;
+    # launching an engine kernel during precompilation can hang the build.
     directory = mktempdir()
     try
         for (name, text, symmetry) in (("off.msh", WORKLOAD_MESH_OFF, "off"), ("xy.msh", WORKLOAD_MESH_XY, "xy"))
@@ -130,6 +143,7 @@ end
         rm(directory; force=true, recursive=true)
     end
     precompile(run_worker, ())
+    precompile_metal_kernel_signatures()
 end
 
 end
