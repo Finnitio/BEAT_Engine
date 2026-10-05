@@ -1352,10 +1352,74 @@ if get(ENV, "BLAB_RUN_COUPLED_METAL", "0") == "1" && metal_available()
                 cpu_voltage_solution.bem_pressure,
                 metal_voltage_solution.bem_pressure,
             ) < 5e-4
-            @test relative_error(
-                cpu_voltage_solution.interface_flux,
-                metal_voltage_solution.interface_flux,
-            ) < 2e-3 # This FP32 fixture's coupled matrix has cond(A, 1) ~= 3.8e9.
+            reference_fem_mesh = load_gmsh41_volume(
+                joinpath(COUPLED_FIXTURE_ROOT, "femvolume.msh"),
+                0.001,
+            )
+            reference_bem_mesh = load_gmsh22_with_tags(
+                joinpath(COUPLED_FIXTURE_ROOT, "exterior_conforming.msh"),
+                0.001,
+            )
+            reference_interface_map = build_conforming_interface_map(
+                reference_fem_mesh,
+                reference_bem_mesh,
+                physical_tag(reference_fem_mesh, 2, "Interface"),
+                2,
+            )
+            reference_transducer = ElectrodynamicTransducer{Float64}(
+                "component:metal-test",
+                [physical_tag(reference_fem_mesh, 2, "Radiator")],
+                [1.0],
+                [1],
+                [-1.0],
+                SVector(0.0, 0.0, 1.0),
+                2.0,
+                1,
+                6.0,
+                0.0005,
+                7.0,
+                0.015,
+                0.0005,
+                1.0,
+            )
+            reference_system = build_coupled_system(
+                reference_fem_mesh,
+                reference_bem_mesh,
+                reference_interface_map,
+                500.0,
+                343.0,
+                1.21;
+                quadrature_order=COUPLED_QUADRATURE_ORDER,
+                singular_order=COUPLED_SINGULAR_ORDER,
+                validation_diagnostics=false,
+                bulk_loss_factor=0.01,
+                prescribed_bem_normal_velocity=Float64.(prescribed_bem_normal_velocity),
+                transducers=[reference_transducer],
+                bem_backend=:cpu,
+            )
+            try
+                reference_excitation = merge(voltage_excitation, (
+                    fem_boundary_weights=Float64[],
+                    amplitude=ComplexF64(voltage_excitation.amplitude),
+                ))
+                reference_voltage_solution = only(
+                    solve_coupled_excitations(reference_system, [reference_excitation]),
+                )
+                # cond(A, 1) ~= 3.8e9: measured CPU32 error is 1.52e-3 and
+                # Metal32 errors are 1.29e-3 to 1.56e-3 against Float64.
+                # Bound each solve against Float64; FP32-vs-FP32 combines their errors.
+                voltage_flux_tolerance = 2e-3
+                @test relative_error(
+                    reference_voltage_solution.interface_flux,
+                    cpu_voltage_solution.interface_flux,
+                ) < voltage_flux_tolerance
+                @test relative_error(
+                    reference_voltage_solution.interface_flux,
+                    metal_voltage_solution.interface_flux,
+                ) < voltage_flux_tolerance
+            finally
+                release_coupled_system!(reference_system)
+            end
             @test relative_error(
                 cpu_voltage_solution.diaphragm_velocity,
                 metal_voltage_solution.diaphragm_velocity,
