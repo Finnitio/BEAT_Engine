@@ -46,7 +46,9 @@ export assemble_condensed_regular_operators,
     release_condensed_coupled_system!,
     solve_condensed_coupled_excitations,
     solve_condensed_coupled_system,
-    solve_condensed_coupled_systems
+    solve_condensed_coupled_systems,
+    assemble_condensed_bem_operators,
+    release_condensed_bem_operators!
 
 """
     _interior_partition(fem_system, interface_operators, retained_vertices)
@@ -1607,6 +1609,113 @@ function _stage_overlap_enabled(bem_backend::Symbol)
 end
 
 """
+    _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+
+The BEM stage of one condensed frequency: the four regular Galerkin operators as host matrices.
+Metal assembles them on the GPU; the CPU uses this solver's own fork of the regular assembly.
+"""
+function _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order::Int)
+    return if prepared.bem_backend == :metal
+        # Metal assembles the four operators on the GPU; the condensed algebra
+        # below is CPU-only, so bring them down and free the device copies.
+        device_operators = assemble_regular_galerkin_operators(
+            bem_mesh,
+            prepared.p1,
+            prepared.dp0,
+            wavenumber,
+            prepared.rule;
+            skip_singular=false,
+            singular_order=singular_order,
+            backend=:metal,
+            device_cache=prepared.device_cache,
+            singular_cache=prepared.singular_cache,
+            device_singular_cache=prepared.device_singular_cache,
+            symmetry_mode=prepared.symmetry_mode,
+        )
+        # Wraps shared device storage in place (copies it when the storage mode
+        # is private); either way the host tuple owns the device buffers, so
+        # `device_operators` must not be released separately.
+        metal_host_operators(device_operators)
+    else
+        assemble_condensed_regular_operators(
+            bem_mesh,
+            prepared.p1,
+            prepared.dp0,
+            wavenumber,
+            prepared.rule;
+            skip_singular=false,
+            singular_order=singular_order,
+            singular_cache=prepared.singular_cache,
+            cpu_cache=prepared.cpu_assembly_cache,
+            symmetry_mode=prepared.symmetry_mode,
+        )
+    end
+end
+
+"""
+    _combine_condensed_bem_operators!(operators, prepared, wavenumber)
+        -> (bem_lhs, bem_rhs_operator, bem_interface_block)
+
+The Burton-Miller combination of one frequency's four operators and the interface coupling block
+`-C Q`, as fresh host arrays. Frees the operators' Metal buffers: nothing reads them afterwards.
+"""
+function _combine_condensed_bem_operators!(operators, prepared, wavenumber)
+    bem_lhs, bem_rhs_operator = burton_miller_neumann_matrices(
+        operators,
+        prepared.identity_p1_p1,
+        prepared.identity_p1_dp0,
+        wavenumber,
+    )
+    # `operators` is dead from here on and the matrices above are freshly
+    # allocated host arrays, so free the Metal buffers now rather than leaking
+    # one operator set per condensed frequency.
+    prepared.bem_backend == :metal && release_operator_storage!(operators)
+    bem_interface_block = -(bem_rhs_operator * Complex{typeof(wavenumber)}.(prepared.interface_operators.bem_flux))
+    return bem_lhs, bem_rhs_operator, bem_interface_block
+end
+
+"""
+    assemble_condensed_bem_operators(bem_mesh, cache, frequency_hz, sound_speed;
+                                     regular_quadrature_order=nothing, singular_order=2)
+        -> (bem_lhs, bem_rhs_operator, bem_interface_block, wavenumber, assembly_s)
+
+The BEM stage of `build_condensed_coupled_system` for one frequency, on its own, so a sweep can
+assemble frequency i+1's operators on the GPU while the host finishes frequency i. Pass the
+result back through `build_condensed_coupled_system(...; bem_operators=() -> result)`. The
+operators are exactly the ones the build would assemble itself; release them with
+`release_condensed_bem_operators!` if they are never consumed.
+"""
+function assemble_condensed_bem_operators(
+    bem_mesh::BoundaryMesh{T},
+    cache,
+    frequency_hz::T,
+    sound_speed::T;
+    regular_quadrature_order::Union{Nothing,Int}=nothing,
+    singular_order::Int=2,
+) where {T<:AbstractFloat}
+    started = time_ns()
+    order = isnothing(regular_quadrature_order) ? cache.base_quadrature_order : regular_quadrature_order
+    bundle = get(cache.quadrature_bundles, order, nothing)
+    isnothing(bundle) && error("Condensed coupled cache holds no quadrature bundle for order $order.")
+    cache.singular_order == singular_order ||
+        error("Condensed coupled cache singular order does not match the requested singular order.")
+    prepared = merge(cache.base, bundle)
+    wavenumber = (T(2pi) * frequency_hz) / sound_speed
+    operators = _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+    bem_lhs, bem_rhs_operator, bem_interface_block = _combine_condensed_bem_operators!(operators, prepared, wavenumber)
+    return (
+        bem_lhs=bem_lhs,
+        bem_rhs_operator=bem_rhs_operator,
+        bem_interface_block=bem_interface_block,
+        wavenumber=wavenumber,
+        assembly_s=(time_ns() - started) / 1.0e9,
+    )
+end
+
+"""Release an `assemble_condensed_bem_operators` result nobody consumed (host arrays only)."""
+release_condensed_bem_operators!(produced, bem_backend::Symbol) = nothing
+
+"""
     build_condensed_coupled_system(fem_mesh, bem_mesh, interface_map, frequency_hz, sound_speed, density; ...)
 
 Assemble and factor the interface-condensed coupled system on the CPU.
@@ -1639,6 +1748,7 @@ function build_condensed_coupled_system(
     prescribed_bem_normal_velocity=nothing,
     schur_block_columns::Int=32,
     allow_transducer_condensation::Bool=true,
+    bem_operators=nothing,
 ) where {T<:AbstractFloat}
     # `relative_residual` needs the monolithic coupled matrix, which this formulation never
     # forms. `fem_interior_residual` on each solution is the condensed-appropriate check.
@@ -1826,7 +1936,9 @@ function build_condensed_coupled_system(
         elimination_split[:mass_prep] = interface_mass_factorization_s
         mass_in_fem_stage = _interface_mass_overlap_enabled(bem_backend)
     end
+    fem_task_s = Ref(0.0)
     fem_stage = () -> begin
+        fem_task_started = time_ns()
         stage_condensation = _build_condensation(
             fem_system,
             interface_operators,
@@ -1841,76 +1953,61 @@ function build_condensed_coupled_system(
                 resolved_transducer_operators, gamma_fem_vertices,
             ),
         ) : nothing
+        fem_task_s[] = (time_ns() - fem_task_started) / 1.0e9
         (stage_condensation, presolve)
     end
     condensation_started = time_ns()
     condensation_task = stage_overlap ? Threads.@spawn(fem_stage()) : nothing
 
-    bem_operator_started = time_ns()
-    # This solver's own fork of the CPU regular assembly, so it can be optimised without
-    # touching the shared path every other backend runs through. Behaviourally identical to
-    # `assemble_regular_galerkin_operators(...; backend=:cpu)`, pinned by an equivalence test.
-    operators = if prepared.bem_backend == :metal
-        # Metal assembles the four operators on the GPU; the condensed algebra
-        # below is CPU-only, so bring them down and free the device copies.
-        device_operators = assemble_regular_galerkin_operators(
-            bem_mesh,
-            prepared.p1,
-            prepared.dp0,
-            wavenumber,
-            prepared.rule;
-            skip_singular=false,
-            singular_order=singular_order,
-            backend=:metal,
-            device_cache=prepared.device_cache,
-            singular_cache=prepared.singular_cache,
-            device_singular_cache=prepared.device_singular_cache,
-            symmetry_mode=prepared.symmetry_mode,
-        )
-        # Wraps shared device storage in place (copies it when the storage mode
-        # is private); either way the host tuple owns the device buffers, so
-        # `device_operators` must not be released separately.
-        metal_host_operators(device_operators)
-    else
-        assemble_condensed_regular_operators(
-            bem_mesh,
-            prepared.p1,
-            prepared.dp0,
-            wavenumber,
-            prepared.rule;
-            skip_singular=false,
-            singular_order=singular_order,
-            singular_cache=prepared.singular_cache,
-            cpu_cache=prepared.cpu_assembly_cache,
-            symmetry_mode=prepared.symmetry_mode,
-        )
+    # The FEM task may be running from here until it is fetched below. A failure in between joins it
+    # before propagating, so the caller's cleanup never releases a solver the task is still using.
+    local prefetched, operators, bem_operator_s, bem_lhs, bem_rhs_operator, bem_interface_block,
+          bem_combine_s, bem_motion_block, bem_prescribed_rhs, interface_radiation_replay, bem_matrix_s
+    try
+        bem_operator_started = time_ns()
+        prefetched = nothing
+        operators = if isnothing(bem_operators)
+            _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+        else
+            # Assembled and combined ahead by the sweep pipeline (`assemble_condensed_bem_operators`);
+            # waiting for it here keeps the FEM task above overlapping whatever is still in flight.
+            prefetched = bem_operators()
+            prefetched.wavenumber == wavenumber || error(
+                "Coupled sweep pipeline delivered BEM operators for k=$(prefetched.wavenumber) where " *
+                "k=$(wavenumber) was needed.",
+            )
+            nothing
+        end
+        bem_operator_s = (time_ns() - bem_operator_started) / 1.0e9
+
+        bem_matrix_started = time_ns()
+        bem_lhs, bem_rhs_operator, bem_interface_block = if isnothing(prefetched)
+            _combine_condensed_bem_operators!(operators, prepared, wavenumber)
+        else
+            (prefetched.bem_lhs, prefetched.bem_rhs_operator, prefetched.bem_interface_block)
+        end
+        # The part of `bem_matrix_s` the sweep pipeline moves onto its producer.
+        bem_combine_s = isnothing(prefetched) ? (time_ns() - bem_matrix_started) / 1.0e9 : 0.0
+        bem_motion_block = transducer_count == 0 ? nothing : -(bem_rhs_operator * bem_motion_flux)
+        bem_prescribed_rhs = prescribed_bem_count == 0 ?
+                             zeros(Complex{T}, length(bem_mesh.vertices), 0) :
+                             Complex{T}.(bem_rhs_operator * bem_prescribed_neumann)
+        # Replay the frozen operating flux without changing the coupled state.
+        # Preserve host matrices before accelerator assembly storage is released.
+        interface_radiation_replay = retain_interface_radiation ? (
+            factorization=lu(Array(bem_lhs)),
+            interface_block=Array(bem_interface_block),
+        ) : nothing
+        bem_matrix_s = (time_ns() - bem_matrix_started) / 1.0e9
+    catch
+        if !isnothing(condensation_task)
+            try
+                wait(condensation_task)
+            catch
+            end
+        end
+        rethrow()
     end
-    bem_operator_s = (time_ns() - bem_operator_started) / 1.0e9
-
-    bem_matrix_started = time_ns()
-    bem_lhs, bem_rhs_operator = burton_miller_neumann_matrices(
-        operators,
-        prepared.identity_p1_p1,
-        prepared.identity_p1_dp0,
-        wavenumber,
-    )
-    # `operators` is dead from here on and the matrices above are freshly
-    # allocated host arrays, so free the Metal buffers now rather than leaking
-    # one operator set per condensed frequency.
-    prepared.bem_backend == :metal && release_operator_storage!(operators)
-    bem_interface_block = -(bem_rhs_operator * Complex{T}.(interface_operators.bem_flux))
-    bem_motion_block = transducer_count == 0 ? nothing : -(bem_rhs_operator * bem_motion_flux)
-    bem_prescribed_rhs = prescribed_bem_count == 0 ?
-                         zeros(Complex{T}, length(bem_mesh.vertices), 0) :
-                         Complex{T}.(bem_rhs_operator * bem_prescribed_neumann)
-    # Replay the frozen operating flux without changing the coupled state.
-    # Preserve host matrices before accelerator assembly storage is released.
-    interface_radiation_replay = retain_interface_radiation ? (
-        factorization=lu(Array(bem_lhs)),
-        interface_block=Array(bem_interface_block),
-    ) : nothing
-    bem_matrix_s = (time_ns() - bem_matrix_started) / 1.0e9
-
     stage_overlap || (condensation_started = time_ns())
     condensation, fem_stage_presolve = if isnothing(condensation_task)
         fem_stage()
@@ -2203,7 +2300,9 @@ function build_condensed_coupled_system(
             fem_system_s=fem_system_s,
             bem_operator_s=bem_operator_s,
             bem_matrix_s=bem_matrix_s,
+            bem_combine_s=bem_combine_s,
             fem_condensation_s=fem_condensation_s,
+            fem_task_s=fem_task_s[],
             # True when `fem_condensation_s` and `bem_operator_s` cover the same
             # wall-clock span and must not be added together.
             stage_overlap=stage_overlap,

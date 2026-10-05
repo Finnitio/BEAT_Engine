@@ -902,6 +902,56 @@ end
             @test_throws ErrorException plan(3502)
         end
     end
+
+    @testset "coupled pipeline is chosen from the run's own section times" begin
+        # Multi_region_SAWMOD on an M1 Max, Metal, sequential medians: the GPU BEM stage and its
+        # combination (0.81 + 0.10 s) outlast the FEM condensation beside them (0.50 s), so a
+        # producer running a frequency ahead hides min(L, G + C - S).
+        sawmod = (bem_operator_s=0.81, bem_combine_s=0.10, fem_task_s=0.50, host_rest_s=0.63)
+        model = coupled_sweep_pipeline_saving_seconds(sawmod...)
+        @test model.sequential_s ≈ 0.81 + 0.10 + 0.63
+        @test model.saving_s ≈ min(0.63, 0.81 + 0.10 - 0.50)
+        # F2B_FLH: a large FEM interior behind a small exterior. The FEM side already binds, so
+        # the pipeline has nothing to hide (measured: 4% slower with it forced on).
+        f2b = (bem_operator_s=0.14, bem_combine_s=0.11, fem_task_s=0.29, host_rest_s=0.11)
+        @test coupled_sweep_pipeline_saving_seconds(f2b...).saving_s ≈ 0 atol = 1e-12
+        # The saving is never negative and never exceeds either side it hides.
+        for G in (0.1, 0.5, 1.0), S in (0.1, 0.5, 1.0), C in (0.0, 0.1), L in (0.0, 0.3, 1.0)
+            saving = coupled_sweep_pipeline_saving_seconds(G, C, S, L).saving_s
+            @test -1e-12 <= saving <= min(L, max(G + C - S, 0)) + 1e-12
+            for R in (0.0, 0.2, 2.0)
+                @test coupled_sweep_pipeline_saving_seconds(G, C, S, L, R).saving_s >= -1e-12
+            end
+        end
+        # Host BEM work the producer does not take over (R) overlaps the FEM task in both
+        # schedules, so it must not be charged to the serial tail: with P = G + C = 5, S = 4,
+        # R = 5 and L = 1 the sequential frequency costs 11 and the pipelined one 6.
+        @test coupled_sweep_pipeline_saving_seconds(4.5, 0.5, 4.0, 1.0, 5.0).saving_s ≈ 5.0
+
+        coupled_plan(timings; kwargs...) = coupled_sweep_pipeline_plan(
+            timings;
+            remaining_frequencies=get(kwargs, :remaining, 39),
+            bem_backend=get(kwargs, :backend, :metal),
+            in_flight_bytes=get(kwargs, :bytes, 400 * 2^20),
+            available_bytes=get(kwargs, :available, 32 * 2^30),
+            threads=get(kwargs, :threads, 8),
+            setting=get(kwargs, :setting, "auto"),
+            min_saving=0.10,
+        )
+        @test coupled_plan(sawmod).enabled && coupled_plan(sawmod).reason == :model
+        @test !coupled_plan(f2b).enabled && coupled_plan(f2b).reason == :model
+        # `auto` pipelines Metal only; the CPU backend's BEM stage is host work too.
+        @test coupled_plan(sawmod; backend=:cpu).reason == :backend
+        # Two more operator sets must fit in half the free working set.
+        @test coupled_plan(sawmod; available=1500 * 2^20).reason == :memory
+        @test coupled_plan(sawmod; threads=1).reason == :single_thread
+        @test !coupled_plan(sawmod; threads=1, setting="on").enabled
+        @test coupled_plan(sawmod; remaining=1).reason == :single_frequency
+        # The setting decides in both directions when it is not `auto`.
+        @test !coupled_plan(sawmod; setting="off").enabled
+        @test coupled_plan(f2b; setting="on").enabled && coupled_plan(f2b; setting="on").reason == :override
+        @test_throws ErrorException coupled_plan(sawmod; setting="sometimes")
+    end
 end
 
 @testset "rigid y0 half-space Green function" begin

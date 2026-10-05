@@ -362,6 +362,66 @@ assembly starts, so it spans the concurrent region and must not be added to
 `bem_operator_s`; `stage_overlap` in the system timings says which reading
 applies.
 
+### Coupled sweep pipeline
+
+The stage overlap hides the FEM condensation behind the GPU, but on a model
+with a large exterior it is the other way round: the GPU assembly is the longer
+of the two, and the host then still has to combine the operators, assemble and
+factor the coupled system, solve and evaluate the field while the GPU idles.
+On Multi_region_SAWMOD (M1 Max) the BEM operators take 0.81 s per frequency,
+the FEM condensation beside them 0.50 s (`fem_task_s`), and the host work after
+both 0.63 s.
+
+A coupled sweep therefore assembles and combines the next frequency's BEM
+operators on a producer task -- `assemble_condensed_bem_operators`, the same
+code `build_condensed_coupled_system` runs, handed back through its
+`bem_operators` argument -- while the host finishes the current frequency. The
+producer reuses the exterior sweep's `start_sweep_assembly_pipeline` at depth
+one. Outputs are bit-identical with the pipeline on and off.
+
+Whether to run it is decided in the run itself. Frequencies solve sequentially
+until `coupled_sweep_pipeline_plan` predicts a saving from the median section
+times of the sequential frequencies so far, leaving out the first (one-off
+compilation and cache costs) and waiting for at least two; medians keep a
+one-off spike -- the first frequency at a new quadrature order -- from deciding:
+
+```text
+sequential  max(G + C + R, S) + L
+pipelined   max(G + C, max(S, R) + L)
+```
+
+with `G` the BEM operator assembly, `C` its combination into the Burton-Miller
+blocks (what the producer takes over), `R` the rest of the BEM matrix stage that
+stays on the host (motion and prescribed-source products, an interface-radiation
+replay LU) and overlaps the FEM task, `S` the FEM condensation task, and `L` the
+coupled block assembly and factorization. With `R = 0` the saving is
+`min(L, G + C - S)` when `G + C > S`, otherwise zero. It starts the producer when the saving exceeds 10% of a
+sequential frequency (`BLAB_COUPLED_SWEEP_PIPELINE_MIN_SAVING`) and two more
+combined operator sets fit in half of Metal's free working set. A model with a
+large FEM interior behind a small exterior -- `F2B_FLH`, where `S` already
+exceeds `G + C` -- stays sequential; forcing the pipeline on there measured 4%
+slower. The modelled saving overstates the measured one: the producer and the
+host stages share the memory system, and on SAWMOD the host block assembly and
+dense LU ran 30-50% slower beside it.
+
+Measured on an M1 Max (eight Julia threads, eight BLAS threads), warm worker,
+interleaved runs, Multi_region_SAWMOD:
+
+| Sweep | Sequential | Pipelined | Change |
+| --- | ---: | ---: | ---: |
+| 40 frequencies, 20 Hz-20 kHz | 64.7-77.0 s, median 70.9 (7 runs) | 54.8-60.0 s, median 57.7 (6 runs) | -19% |
+| 200 frequencies, 20 Hz-20 kHz (GUI order), with MUMPS on Accelerate | 321.0 s | **248.7 s** | -23% |
+
+Peak worker memory grows by about 1 GB (5.2 to 6.1 GB on the 200-frequency
+sweep), the producer's queued and in-flight operator sets. On `F2B_FLH` the
+plan keeps the sweep sequential.
+
+Result diagnostics report `coupled_sweep_pipeline` (whether this frequency's
+operators came from the producer), `coupled_sweep_pipeline_reason` and
+`coupled_sweep_pipeline_saving_model_s`. `fem_task_s` in the timings is the FEM
+condensation task's own duration, which `fem_condensation_s` cannot show when
+the stages overlap.
+
 ### Schur block balance
 
 The Schur complement hands right-hand-side blocks to worker tasks round-robin,
@@ -541,6 +601,8 @@ Normal application use does not require these environment variables.
 | `BLAB_METAL_OVERLAP_HOST_SLOWDOWN` | `0.1` | |
 | `BLAB_METAL_ATOMIC_SCATTER` | `1` | Diagnostic for `pair_atomic` only: `0` skips the atomic scatter to time the pair arithmetic (the operators are then wrong). |
 | `BLAB_COUPLED_STAGE_OVERLAP` | `auto` | Coupled solves: `auto` runs the FEM condensation on its own thread while the GPU assembles the BEM operators; `off` runs them in sequence; `on` forces the overlap on `beat_cpu` too. Needs more than one Julia thread. |
+| `BLAB_COUPLED_SWEEP_PIPELINE` | `auto` | Coupled sweeps: `auto` assembles the next frequency's BEM operators ahead when the run's own section times predict a saving (see [Coupled sweep pipeline](#coupled-sweep-pipeline)); `on` forces it from the second frequency, `off` never. Needs more than one Julia thread. |
+| `BLAB_COUPLED_SWEEP_PIPELINE_MIN_SAVING` | `0.10` | Smallest modelled saving, as a fraction of a sequential frequency, that starts the coupled sweep pipeline under `auto`. |
 | `BLAB_COUPLED_DENSE_REFINEMENT` | `auto` on Metal, `off` elsewhere | Coupled Float32 solves: assemble the dense system in `ComplexF64`, factor in `ComplexF32`, refine to the Float64 backward error (falls back to a `ComplexF64` LU with a reason). `1`/`auto`/`0`. |
 | `BLAB_COUPLED_DENSE_FLOAT64` | `off` | Coupled Float32 solves: plain `ComplexF64` dense LU instead (refinement takes precedence when both are on). |
 | `BLAB_COUPLED_FEM_FLOAT64` | `auto` on Metal, `off` elsewhere | Coupled Float32 solves: assemble the FEM stiffness, mass and bulk-loss matrices in `Float64`. |
@@ -592,6 +654,7 @@ CPU-versus-Metal validation scripts:
 | `validate_metal_coupled.jl` | Coupled FEM-BEM-LEM assembly, condensation, solution, and field for the monolithic and condensed paths, prescribed-velocity and voltage excitations. |
 | `validate_metal_sweep_pipeline.jl` | The sweep assembly pipeline at depths 1-4: steps delivered in order with their own frequency, and pipelined assemblies against sequential ones. |
 | `validate_metal_exterior_pipeline.jl` | A compiled exterior request solved sequentially and overlapped at depths 1-4 through the worker: every output bit-identical and labelled with its own frequency. `BLAB_VALIDATE_SYMMETRY` picks the arm. |
+| `validate_metal_coupled_pipeline.jl` | A condensed coupled sweep built from operators the sweep pipeline assembled ahead against the same sweep built sequentially: every solution bit-identical, prescribed-velocity and voltage excitations. |
 
 For example:
 
