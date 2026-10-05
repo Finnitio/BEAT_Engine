@@ -1740,3 +1740,51 @@ if isnothing(Base.locate_package(BeatEngineCoupledCondensed.BeatEngineMumps.MUMP
 else
     include(joinpath(@__DIR__, "coupled_mumps_tests.jl"))
 end
+
+@testset "host ZGEMM for the flux-elimination products" begin
+    zgemm = BeatEngineCoupledCondensed._host_zgemm
+    A = ComplexF64[sin(i + 2j) + im * cos(i * j) for i in 1:37, j in 1:23]
+    B = ComplexF64[cos(i - j) - im * sin(2i + j) for i in 1:23, j in 1:11]
+    reference = A * B
+    for setting in ("auto", "blas")
+        withenv("BLAB_COUPLED_HOST_ZGEMM" => setting) do
+            @test isapprox(zgemm(A, B), reference; rtol=1e-13)
+            # A contiguous column range is read in place, as `_flux_block_products!` does.
+            wide = hcat(zeros(ComplexF64, 37, 4), A, zeros(ComplexF64, 37, 3))
+            @test isapprox(zgemm(view(wide, :, 5:27), B), reference; rtol=1e-13)
+            # Non-unit row stride and other element types take Julia's `*`.
+            strided = view(vcat(A, A), 1:2:74, :)
+            @test isapprox(zgemm(strided, B), Matrix(strided) * B; rtol=1e-13)
+            @test zgemm(ComplexF32.(A), ComplexF32.(B)) == ComplexF32.(A) * ComplexF32.(B)
+            @test size(zgemm(zeros(ComplexF64, 5, 0), zeros(ComplexF64, 0, 3))) == (5, 3)
+            @test iszero(zgemm(zeros(ComplexF64, 5, 0), zeros(ComplexF64, 0, 3)))
+            @test size(zgemm(zeros(ComplexF64, 0, 4), zeros(ComplexF64, 4, 3))) == (0, 3)
+            @test size(zgemm(zeros(ComplexF64, 5, 4), zeros(ComplexF64, 4, 0))) == (5, 0)
+            # A row sub-range of a taller parent: the leading dimension exceeds the row count.
+            tall = vcat(A, ComplexF64.(randn(11, 23)))
+            @test isapprox(zgemm(view(tall, 1:37, :), B), reference; rtol=1e-13)
+            taller = hcat(zeros(ComplexF64, 48, 2), tall)
+            @test isapprox(zgemm(view(taller, 1:37, 3:25), B), reference; rtol=1e-13)
+            # A reversed column range is a StridedMatrix with a negative column stride: `*` handles it.
+            @test isapprox(zgemm(view(A, :, 23:-1:1), B[end:-1:1, :]), reference; rtol=1e-13)
+            @test isapprox(zgemm(A[:, end:-1:1], view(B, 23:-1:1, :)), reference; rtol=1e-13)
+            @test isapprox(zgemm(A, view(B, :, 11:-1:1)), reference[:, end:-1:1]; rtol=1e-13)
+            # A product at the solver's shape (about 3,100 rows), where threading engages.
+            big_A = ComplexF64[sin(0.01i + 0.3j) + im * cos(0.02i * j) for i in 1:3100, j in 1:300]
+            big_B = ComplexF64[cos(0.1i - 0.2j) - im * sin(0.05i + j) for i in 1:300, j in 1:300]
+            @test isapprox(zgemm(big_A, big_B), big_A * big_B; rtol=1e-12)
+        end
+    end
+    # Availability-aware: macOS before 13.3 lacks the new-LAPACK entry point, and `auto` then uses BLAS.
+    if BeatEngineCoupledCondensed._accelerate_zgemm() != C_NULL
+        withenv("BLAB_COUPLED_HOST_ZGEMM" => "accelerate") do
+            @test isapprox(zgemm(A, B), reference; rtol=1e-13)
+        end
+    else
+        @test_throws "not available" withenv(() -> BeatEngineCoupledCondensed._host_zgemm_symbol(),
+            "BLAB_COUPLED_HOST_ZGEMM" => "accelerate")
+    end
+    @test withenv(() -> BeatEngineCoupledCondensed._host_zgemm_symbol(), "BLAB_COUPLED_HOST_ZGEMM" => "blas") == C_NULL
+    @test_throws "BLAB_COUPLED_HOST_ZGEMM" withenv(() -> BeatEngineCoupledCondensed._host_zgemm_symbol(),
+        "BLAB_COUPLED_HOST_ZGEMM" => "mkl")
+end
