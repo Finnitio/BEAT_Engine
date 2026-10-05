@@ -9,6 +9,46 @@ import BeatEngineCompiledMetalBundle
     @test Base.typename(typeof(taskref[].code)).wrapper === wrapper
 end
 
+@testset "coupled Metal inventory is compile-only and structurally resolved" begin
+    bundle = BeatEngineCompiledMetalBundle
+    cc = bundle.BeatEngineCoupledCondensed
+    mumps = cc.BeatEngineMumps
+    library_before = mumps.LIBRARY[]
+    solvers_before = copy(mumps.LIVE_SOLVERS)
+    types = bundle.metal_coupled_types()
+    closures = bundle.metal_coupled_closure_types()
+    host = bundle.metal_coupled_host_signatures()
+    runtime = bundle.metal_coupled_runtime_signatures()
+    @test !isempty(host) && !isempty(runtime)
+    @test all(isconcretetype, values(types))
+    @test fieldtype(types.cache, :base) === types.base
+    @test fieldtype(types.system, :cache) === types.cache
+    @test fieldtype(types.system, :condensation) === types.condensation
+    @test fieldtype(types.system, :factorization) === cc.RefinedDenseLU
+    @test fieldtype(types.condensation, :mumps_solver) === mumps.MumpsSchurSolver
+    @test fieldtype(types.base, :device_cache) ===
+          bundle.BeatEngineCore.MetalRegularAssemblyCache{Float32,Nothing}
+    @test fieldtype(closures.timed_flux, :flux_rhs_solution) === Core.Box
+    @test fieldtype(closures.solution_parts, :system) === types.system
+    @test fieldtype(closures.fem_task, :fem_stage) === closures.fem_stage
+    @test fieldtype(closures.fem_stage, :dense_type) === Type{Float64}
+    @test fieldtype(closures.fem_stage, :fem_system) === Core.Box
+    # These must join the inventories that the existing strict precompile gate
+    # checks, rather than live in an unused helper.
+    all_host = bundle.metal_host_signatures()
+    all_runtime = bundle.metal_runtime_signatures()
+    @test all(signature -> signature in all_host, host)
+    @test all(signature -> signature in all_runtime, runtime)
+    @test any(((f, args),) -> f === Core.kwcall && args[2] ===
+              typeof(cc.build_condensed_coupled_system), host)
+    @test any(((f, args),) -> f === Core.kwcall && args[2] ===
+              typeof(cc.solve_condensed_coupled_excitations), host)
+    @test (cc.release_condensed_coupled_system!, (types.system,)) in host
+    @test Tuple{typeof(collect), Base.Generator{Base.OneTo{Int},closures.solution_parts}} in runtime
+    @test mumps.LIBRARY[] === library_before
+    @test mumps.LIVE_SOLVERS == solvers_before
+end
+
 @testset "Metal host workload has matching compile-only methods" begin
     signatures = BeatEngineCompiledMetalBundle.metal_host_signatures()
     @test !isempty(signatures)

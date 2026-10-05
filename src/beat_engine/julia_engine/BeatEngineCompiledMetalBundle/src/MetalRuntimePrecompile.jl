@@ -115,6 +115,7 @@ function metal_runtime_signatures()
         push!(signatures, Tuple{typeof(Base.map), typeof(Metal.mtlconvert), Tuple{host_args...}})
         push!(signatures, Tuple{typeof(Base.append!), Vector{Any}, Tuple{function_type,Tuple{host_args...}}})
     end
+    append!(signatures, metal_coupled_runtime_signatures())
     return unique(signatures)
 end
 

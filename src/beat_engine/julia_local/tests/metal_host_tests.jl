@@ -21,6 +21,48 @@ import Metal
 
 include(joinpath(@__DIR__, "compiled_metal_worker_tests.jl"))
 
+@testset "coupled host launches restore the production storage modes" begin
+    bundle = BeatEngineCompiledMetalBundle
+    core = bundle.BeatEngineCore
+    launches = bundle.metal_coupled_launch_types()
+    runtime = bundle.metal_coupled_runtime_signatures()
+    @test Set(f for (f, _, _, _) in launches) == Set((
+        core._metal_regular_pair_blocks_kernel!, core._metal_gather_slp_adjoint_kernel!,
+        core._metal_gather_dlp_hyp_kernel!, core._metal_singular_fused_blocks_kernel!,
+        core._metal_singular_pair_gather_kernel!))
+    pair_orders = Set{Int}()
+    for (f, tt, args, size) in launches
+        @test length(args) == fieldcount(tt)
+        @test all(isconcretetype, args)
+        gathered = f in (core._metal_gather_slp_adjoint_kernel!,
+                        core._metal_gather_dlp_hyp_kernel!, core._metal_singular_pair_gather_kernel!)
+        for (index, device_type) in enumerate(fieldtypes(tt))
+            host_type = args[index]
+            if device_type <: Metal.MtlDeviceArray
+                storage = gathered && index <= 2 ? Metal.SharedStorage : Metal.PrivateStorage
+                @test host_type === Metal.MtlArray{eltype(device_type),ndims(device_type),storage}
+            else
+                @test host_type === device_type
+            end
+        end
+        if f === core._metal_regular_pair_blocks_kernel!
+            @test size === Tuple{Int,Int}
+            push!(pair_orders, args[17].parameters[1])
+        else
+            @test size === Int
+        end
+        kernel = Metal.HostKernel{typeof(f),tt}
+        captures = (; groups=size, threads=size, queue=Nothing, submit=Bool,
+                    kernel=kernel, args=Tuple{args...})
+        closure = bundle.metal_captured_closure_type(Metal, captures)
+        @test Set(fieldnames(closure)) == Set(keys(captures))
+        @test all(name -> fieldtype(closure, name) === getproperty(captures, name), keys(captures))
+        signature = Tuple{Type{Metal.ObjectiveC.Foundation.NSAutoreleasePool},closure}
+        @test signature in runtime
+    end
+    @test pair_orders == Set((1, 3, 6))
+end
+
 using BeatEngineMetalBundle
 const Engine = BeatEngineMetalBundle.BeatEngineCore
 
