@@ -99,6 +99,7 @@ function workload_request(mesh, symmetry)
 end
 
 include("MetalKernelPrecompile.jl")
+include("MetalCoupledPrecompile.jl")
 include("MetalHostPrecompile.jl")
 include("MetalRuntimePrecompile.jl")
 

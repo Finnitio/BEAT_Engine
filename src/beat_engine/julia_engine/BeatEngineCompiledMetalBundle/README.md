@@ -46,11 +46,30 @@ Measured on an M1 Max (Julia 1.12.7, fresh worker, package images already
 built, Multi_region_SAWMOD, 10 frequencies): worker start-up plus first request
 was 21.4 + 38.2 s on `main`, 3.8 + 19.7 s with the exterior workload alone, and
 3.8 + 10.0-10.2 s with the coupled workload; `F2B_FLH` 3.6 + 16.7 s against
-3.9 + 7.0 s. The remaining first-request compilation is mostly the Metal side
-of the coupled path, which this host workload does not reach: Metal-typed
-cache structures, `metal_host_operators` and the regular-operator orchestration,
-and the spawned FEM stage (the workload runs it inline). Covering those needs
-compile-only signatures traced from a Metal coupled request.
+3.9 + 7.0 s.
+
+The host workload does not reach the Metal side of the coupled path (Metal-typed
+cache structures, `metal_host_operators`, the regular-operator gather/scatter
+drivers and launch closures, symmetry row weights, the spawned FEM stage), so
+`MetalCoupledPrecompile.jl` adds compile-only signatures for it, traced from a
+fresh worker's first Metal coupled request (172 compiled statements, 5.6 s; the
+inventory targets the 58 that took 4.7 s). Types are spelled out as descriptors
+(Float32 Metal caches and shared operator tuples, Float64 FEM and MUMPS
+condensation, CHOLMOD mass blocks, refined dense LU, the per-excitation solution
+schema) without creating caches, factors or device arrays. Compiler-generated
+closures (the solution generator, timed solve/product closures, the FEM stage,
+Metal's autorelease launch closure) are found by their exact captured-field
+names, never by generated names, and the keyword body through
+`Base.bodyfunction`. Kernel argument types come from `metal_kernel_signatures()`.
+Left out on purpose: the wire parser's stateless generators, LLVM/ghost-type
+compiler helpers, Metal broadcast internals and shutdown/archive callbacks, which
+have no robust structural handle. With it, the first request falls to 3.9 +
+4.7-4.9 s on the same SAWMOD measurement. `compiled_metal_worker_tests.jl` and
+`metal_host_tests.jl` check that every entry still `precompile`s; because that
+cannot show an entry still matches the production types, the hardware gate
+`metal_coupled_precompile_coverage_tests.jl` runs the coupled request with Metal
+BEM in a fresh worker under `--trace-compile` and fails when coupled-path
+compilation exceeds `BLAB_COUPLED_COMPILE_BUDGET_MS` (1,500 ms).
 
 `MetalHostPrecompile.jl` additionally calls `precompile(f, argtypes)` for the
 Float32 native exterior path: fused assembly and gather orchestration, host

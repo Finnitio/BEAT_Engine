@@ -129,6 +129,7 @@ function metal_host_signatures()
         kwtype = NamedTuple{(:threads, :groups),Tuple{launch_size,launch_size}}
         push!(signatures, (Core.kwcall, (kwtype, Metal.HostKernel{typeof(f),tt}, args...)))
     end
+    append!(signatures, metal_coupled_host_signatures())
     return signatures
 end
 

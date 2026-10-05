@@ -22,7 +22,7 @@ function metal_runtime_signatures()
     channel_task_wrapper = metal_channel_task_wrapper_type()
     # The keyword implementation also has a patch-dependent generated name.
     metal_kernel_keyword_body = typeof(Base.bodyfunction(which(Tuple{Metal.HostKernel})))
-    return [
+    signatures = [
         Tuple{typeof(BeatEngineCompiledMetalBundle.BeatEngineContract.validate_worker_submission), JSON.Object{String, Any}},
         Tuple{typeof(BeatEngineCompiledMetalBundle.BeatEngineWorkerCleanup.cleanup_options), JSON.Object{String, Any}},
         Tuple{Type{Base.Generator{I, F} where F where I}, BeatEngineCompiledMetalBundle.BeatEngineWorkerCleanup.var"#cleanup_options##0#cleanup_options##1", Base.KeySet{Any, Base.Dict{Any, Any}}},
@@ -101,6 +101,8 @@ function metal_runtime_signatures()
         Tuple{typeof(Base.string), Metal.MTL.MTLDevice},
         Tuple{typeof(Core.kwcall), NamedTuple{(:cancelled, :free_fraction), Tuple{Bool, Nothing}}, typeof(BeatEngineCompiledMetalBundle.BeatEngineWorkerCleanup.cleanup_reason), NamedTuple{(:policy, :max_requests, :min_free_fraction), Tuple{String, Int64, Float64}}, Int64},
     ]
+    append!(signatures, metal_coupled_runtime_signatures())
+    return signatures
 end
 
 function precompile_metal_runtime_signatures()
