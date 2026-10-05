@@ -1139,6 +1139,7 @@ function _build_mumps_condensation(
             mumps_solver=solver,
             mumps_owned=owned,
             mumps_threads=threads,
+            mumps_blas=library.blas,
             # The full FEM block, for the back substitution's residual and coupling matvecs.
             fem_system=fem_system,
             factorization=nothing,

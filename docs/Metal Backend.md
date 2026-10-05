@@ -489,6 +489,34 @@ not download them; there `mumps` falls back with the reason "MUMPS_seq_jll is
 not in this Julia environment". Its tests are `tests/mumps_tests.jl`, run under
 `julia_metal` in the macOS CI job.
 
+MUMPS calls the LP64 BLAS interface, which Julia's own configuration (ILP64
+OpenBLAS) leaves empty. On Apple Silicon the loader forwards Apple Accelerate's
+LP64 interface (the macOS 13.3 "new LAPACK" symbols) into it; elsewhere, or if
+that forward fails, `OpenBLAS32_jll`. Only the LP64 slots change, so Julia's
+own dense LU and products keep OpenBLAS and their thread count, and their
+results are bit-identical either way. `BLAB_MUMPS_BLAS=openblas` restores the
+OpenBLAS route; result diagnostics report `mumps_blas`. The MUMPS
+factorization's rounding changes with the BLAS, far below the Float32 output
+precision. On Multi_region_SAWMOD at ten frequencies from 20 Hz to 20 kHz the
+Accelerate route agrees with the OpenBLAS route to 8.4e-9 relative L2 in pressure
+(2.8e-5 dB worst within 30 dB of each output's peak), 1.9e-12 in diaphragm
+velocity and 4.6e-10 in interface velocity, and both measure the same 9.8e-6
+relative L2 (1.7e-3 dB) in pressure against the CPU Float64 reference.
+
+Measured on an M1 Max (eight Julia threads, eight BLAS threads), 40 frequencies
+from 20 Hz to 20 kHz, warm worker, interleaved runs:
+
+| Fixture | OpenBLAS32 (s per sweep) | Accelerate (s per sweep) | `fem_condensation_factorization_s` |
+| --- | ---: | ---: | --- |
+| `F2B_FLH` (large FEM interior, small exterior) | 23.0, 23.3, 24.6 | **15.4, 15.6** | 0.25-0.27 s to 0.15 s |
+| `Multi_region_SAWMOD` | 70.9, 72.3 | 67.4, 77.1 | 0.42 s to 0.26-0.27 s |
+
+On `F2B_FLH` the FEM condensation is the critical path, and the whole sweep is
+33% faster; the host block assembly and dense LU also run faster beside it, as
+MUMPS no longer occupies the cores with OpenBLAS threads. On SAWMOD the
+condensation already hides behind the GPU BEM assembly, so the faster
+factorization does not shorten the sweep (the spread is run-to-run noise).
+
 On Multi_region_SAWMOD (three transducers, three FEM regions, four interfaces,
 xy symmetry; M1 Max, eight Julia threads, 4 frequencies, 3 interleaved rounds)
 the dense order falls from 7,933 to 3,116. Median assembly per frequency, each
@@ -599,7 +627,8 @@ Normal application use does not require these environment variables.
 | `BLAB_COUPLED_INTERFACE_BLOCKS` | `auto` on Metal, `off` elsewhere | As above. |
 | `BLAB_COUPLED_DEMAND_RECONSTRUCTION` | `auto` on Metal, `off` elsewhere | As above. |
 | `BLAB_COUPLED_FEM_SOLVER` | `mumps` on Metal, `umfpack` elsewhere | `umfpack` or `mumps`. |
-| `BLAB_MUMPS_THREADS` / `BLAB_MUMPS_SOLVE_THREADS` | `4` / `1` | BLAS threads for the MUMPS factorization and solve phases. |
+| `BLAB_MUMPS_BLAS` | `auto` | LP64 BLAS behind MUMPS: `auto` is Apple Accelerate on Apple Silicon and `OpenBLAS32_jll` elsewhere; `accelerate` or `openblas` asks for one. |
+| `BLAB_MUMPS_THREADS` / `BLAB_MUMPS_SOLVE_THREADS` | `4` / `1` | OpenBLAS threads for the MUMPS factorization and solve phases (Accelerate schedules its own). |
 | `BLAB_SCHUR_BLOCK` | unset | Coupled solves: pins the Schur complement right-hand-side block width, bypassing the thread-count balancing. For measurement only. |
 | `BLAB_BEAT_FUSED_BM` | `1` | Set to `0` to assemble the four operators and combine them on the host for exterior solves. Coupled solves, `host_staged` assembly and the `host` singular mode always take the four-operator path. |
 
