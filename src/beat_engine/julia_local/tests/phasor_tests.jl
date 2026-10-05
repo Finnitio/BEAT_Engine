@@ -49,6 +49,25 @@
                     assemble_operator=true)
                 @test isapprox(Array(mapping), b; rtol=3f-3, atol=3f-4)
                 @test isapprox(Array(mapping * dq), Array(rhs); rtol=2f-5, atol=2f-6)
+                operator_system = assemble_burton_miller_neumann_system_cuda(mesh,p1,dp0,units,k,rule;
+                    device_cache=dc,singular_cache=sc,device_singular_cache=dsc,
+                    assemble_operator=true)
+                @test isapprox(Array(operator_system.matrix), Array(direct.matrix); rtol=2f-5, atol=2f-6)
+                @test isapprox(Array(operator_system.rhs), Array(mapping); rtol=2f-5, atol=2f-6)
+                release_burton_miller_system_cuda!(operator_system)
+                qs = hcat(q, conj.(q) .* ComplexF32(0.5, 1), reverse(q))
+                dqs = CUDA_MODULE.CuArray(qs)
+                for rhs_mode in (:cached_operator, :matrix_free), columns in (1, 3)
+                    columns_system = assemble_burton_miller_neumann_system_columns_cuda(
+                        mesh,p1,dp0,dqs[:, 1:columns],k,rule;rhs_mode=rhs_mode,
+                        device_cache=dc,singular_cache=sc,device_singular_cache=dsc)
+                    @test columns_system.rhs_mode == rhs_mode
+                    @test size(columns_system.rhs) == (length(p), columns)
+                    @test isapprox(Array(columns_system.matrix), a; rtol=3f-3, atol=3f-4)
+                    @test isapprox(Array(columns_system.rhs), b*qs[:, 1:columns]; rtol=3f-3, atol=3f-4)
+                    release_burton_miller_system_cuda!(columns_system)
+                end
+                CUDA_MODULE.unsafe_free!(dqs)
                 CUDA_MODULE.unsafe_free!(mapping)
                 CUDA_MODULE.unsafe_free!(units)
                 @test solve_burton_miller_system_cuda!(direct) ≈ p rtol=5f-3 atol=3f-4

@@ -65,7 +65,9 @@ function _cuda_bm_scale_rows_kernel!(matrix_re, matrix_im, rhs_re, rhs_im, row_w
     weight = row_weights[row]
     matrix_re[index] *= weight
     matrix_im[index] *= weight
-    if index <= dof_count
+    # A 2-D right-hand side (the DP0-to-P1 mapping) is scaled separately by
+    # `_cuda_bm_scale_rhs_kernel!`; its first p1 entries are only column 1.
+    if ndims(rhs_re) == 1 && index <= dof_count
         rhs_re[index] *= weight
         rhs_im[index] *= weight
     end
@@ -374,7 +376,13 @@ function assemble_burton_miller_neumann_system_cuda(
     symmetry_mode::Symbol=:off,
     timing=nothing,
     identity_p1_p1_block=nothing,
+    assemble_operator::Bool=false,
 ) where {T<:AbstractFloat}
+    # With `assemble_operator`, the right-hand side is stored as a P1 x DP0
+    # matrix whose column j receives only trial element j's contributions, as in
+    # `assemble_burton_miller_rhs_cuda`. With unit `q_neumann` that is the
+    # DP0-to-P1 right-hand-side mapping, formed in the same pair launches as the
+    # system matrix.
     k = outgoing_wavenumber(k)
     CUDA.functional() || error("Direct Burton-Miller CUDA assembly requested, but CUDA.functional() is false.")
     length(q_neumann) == dp0_space.global_dof_count || error("Direct Burton-Miller Neumann vector size mismatch.")
@@ -395,18 +403,32 @@ function assemble_burton_miller_neumann_system_cuda(
         error("Direct Burton-Miller image-near correction requires a matching device cache.")
     end
     p1_count = p1_space.global_dof_count
-    # Store real and imaginary lanes interleaved so the assembled storage can
-    # be reinterpreted as Complex{T} without allocating a second dense matrix.
-    # This removes the 3x dense-matrix peak (real + imaginary + complex) that
-    # otherwise exhausts an 11 GiB GPU for eight moderate speaker boundaries.
-    matrix_storage = CUDA.zeros(T, 2, p1_count, p1_count)
-    matrix_re = view(matrix_storage, 1, :, :)
-    matrix_im = view(matrix_storage, 2, :, :)
-    rhs_re = CUDA.zeros(T, p1_count)
-    rhs_im = CUDA.zeros(T, p1_count)
-    matrix = rhs = nothing
+    # Store real and imaginary lanes interleaved so the assembled storage is
+    # already Complex{T} without allocating a second dense matrix. This removes
+    # the 3x dense-matrix peak (real + imaginary + complex) that otherwise
+    # exhausts an 11 GiB GPU for eight moderate speaker boundaries.
+    #
+    # The complex arrays own their storage and the kernels write through a
+    # derived Float32 view that is released before returning, so one
+    # `unsafe_free!` of the returned matrix (or mapping) frees the memory at
+    # once. A complex view derived from Float32 storage instead would keep the
+    # storage alive until its unreachable parents are garbage collected.
+    matrix = rhs = matrix_lanes = rhs_lanes = rhs_re = rhs_im = nothing
     succeeded = false
     try
+        matrix = CUDA.zeros(Complex{T}, p1_count, p1_count)
+        matrix_lanes = reinterpret(reshape, T, matrix)
+        matrix_re = view(matrix_lanes, 1, :, :)
+        matrix_im = view(matrix_lanes, 2, :, :)
+        if assemble_operator
+            rhs = CUDA.zeros(Complex{T}, p1_count, dp0_space.global_dof_count)
+            rhs_lanes = reinterpret(reshape, T, rhs)
+            rhs_re = view(rhs_lanes, 1, :, :)
+            rhs_im = view(rhs_lanes, 2, :, :)
+        else
+            rhs_re = CUDA.zeros(T, p1_count)
+            rhs_im = CUDA.zeros(T, p1_count)
+        end
         identity_transform = symmetry_transforms(:off; include_identity=true)[1]
         _cuda_timed_stage!(timing, "direct_system_regular") do
             _launch_cuda_bm_regular_transform!(
@@ -479,6 +501,12 @@ function assemble_burton_miller_neumann_system_cuda(
                 CUDA.@cuda threads=threads blocks=blocks _cuda_bm_scale_rows_kernel!(
                     matrix_re, matrix_im, rhs_re, rhs_im, row_weights, p1_count,
                 )
+                if assemble_operator
+                    blocks = cld(length(rhs_re), threads)
+                    CUDA.@cuda threads=threads blocks=blocks _cuda_bm_scale_rhs_kernel!(
+                        rhs_re, rhs_im, row_weights, p1_count,
+                    )
+                end
                 CUDA.synchronize()
             finally
                 CUDA.unsafe_free!(row_weights)
@@ -486,8 +514,7 @@ function assemble_burton_miller_neumann_system_cuda(
         end
 
         _cuda_timed_stage!(timing, "direct_system_complex_materialize") do
-            matrix = reshape(reinterpret(Complex{T}, matrix_storage), p1_count, p1_count)
-            rhs = complex.(rhs_re, rhs_im)
+            assemble_operator || (rhs = complex.(rhs_re, rhs_im))
             CUDA.synchronize()
         end
         succeeded = true
@@ -502,10 +529,15 @@ function assemble_burton_miller_neumann_system_cuda(
             assembly_mode=:direct_burton_miller,
         )
     finally
-        CUDA.unsafe_free!(rhs_re)
-        CUDA.unsafe_free!(rhs_im)
+        matrix_lanes === nothing || CUDA.unsafe_free!(matrix_lanes)
+        if assemble_operator
+            rhs_lanes === nothing || CUDA.unsafe_free!(rhs_lanes)
+        else
+            rhs_re === nothing || CUDA.unsafe_free!(rhs_re)
+            rhs_im === nothing || CUDA.unsafe_free!(rhs_im)
+        end
         if !succeeded
-            CUDA.unsafe_free!(matrix_storage)
+            matrix === nothing || CUDA.unsafe_free!(matrix)
             rhs === nothing || CUDA.unsafe_free!(rhs)
         end
     end
@@ -656,6 +688,109 @@ function assemble_burton_miller_rhs_cuda(
             rhs_re === nothing || CUDA.unsafe_free!(rhs_re)
             rhs_im === nothing || CUDA.unsafe_free!(rhs_im)
             (!succeeded && rhs !== nothing) && CUDA.unsafe_free!(rhs)
+        end
+    end
+end
+
+_cuda_out_of_memory(err) = err isa OutOfMemoryError || nameof(typeof(err)) == :OutOfGPUMemoryError
+
+# Direct Burton-Miller system with one right-hand side per column of
+# `q_columns` (DP0 dofs x excitations), for solves that share one factorization.
+#
+# `:cached_operator` runs the system assembly once with unit Neumann data and a
+# P1 x DP0 right-hand side, which is the DP0-to-P1 mapping B, then forms every
+# right-hand side as B * q_columns: one pair integration for any number of
+# excitations. `:matrix_free` integrates excitation 1 with the system and
+# repeats the regular, image and singular pair integration for every further
+# excitation. If B cannot be allocated the assembly falls back to
+# `:matrix_free`; the returned `rhs_mode` is the one that ran. `rhs` is always
+# P1 dofs x excitations.
+function assemble_burton_miller_neumann_system_columns_cuda(
+    mesh::BoundaryMesh{T},
+    p1_space::P1Space,
+    dp0_space::DP0Space,
+    q_columns::CuMatrix,
+    k::T,
+    rule::TriangleRule{T};
+    rhs_mode::Symbol,
+    identity_p1_p1_block=nothing,
+    timing=nothing,
+    kwargs...,
+) where {T<:AbstractFloat}
+    rhs_mode in (:cached_operator, :matrix_free) || error(
+        "Unknown Burton-Miller right-hand-side mode $(rhs_mode); expected :cached_operator or :matrix_free.",
+    )
+    size(q_columns, 1) == dp0_space.global_dof_count || error("Direct Burton-Miller Neumann matrix size mismatch.")
+    excitation_count = size(q_columns, 2)
+    excitation_count >= 1 || error("Direct Burton-Miller assembly requires at least one excitation.")
+
+    if rhs_mode == :cached_operator
+        units = system = rhs = nothing
+        try
+            units = CUDA.ones(Complex{T}, dp0_space.global_dof_count)
+            system = assemble_burton_miller_neumann_system_cuda(
+                mesh, p1_space, dp0_space, units, k, rule;
+                identity_p1_p1_block=identity_p1_p1_block,
+                timing=timing,
+                assemble_operator=true,
+                kwargs...,
+            )
+            _cuda_timed_stage!(timing, "direct_system_rhs_operator_apply") do
+                rhs = system.rhs * q_columns
+                CUDA.synchronize()
+            end
+            operator_bytes = sizeof(system.rhs)
+            CUDA.unsafe_free!(system.rhs)
+            return merge(system, (rhs=rhs, rhs_mode=:cached_operator, rhs_operator_bytes=operator_bytes))
+        catch err
+            system === nothing || release_burton_miller_system_cuda!(system)
+            rhs === nothing || CUDA.unsafe_free!(rhs)
+            _cuda_out_of_memory(err) || rethrow()
+            @warn "Burton-Miller right-hand-side mapping did not fit in GPU memory; integrating each excitation instead." excitation_count
+        finally
+            units === nothing || CUDA.unsafe_free!(units)
+        end
+    end
+
+    system = first_q = column_q = rhs = nothing
+    columns = Any[]
+    succeeded = false
+    try
+        first_q = q_columns[:, 1]
+        system = assemble_burton_miller_neumann_system_cuda(
+            mesh, p1_space, dp0_space, first_q, k, rule;
+            identity_p1_p1_block=identity_p1_p1_block,
+            timing=timing,
+            kwargs...,
+        )
+        if excitation_count == 1
+            # One column in both modes. Freeing the vector drops only its
+            # reference; the reshaped matrix now owns the storage.
+            rhs = reshape(system.rhs, :, 1)
+            CUDA.unsafe_free!(system.rhs)
+        else
+            column_q = similar(first_q)
+            dof_count = length(first_q)
+            for column in 2:excitation_count
+                # A contiguous column view would be a derived array holding a
+                # reference to q_columns' storage until it is collected.
+                copyto!(column_q, 1, q_columns, (column - 1) * dof_count + 1, dof_count)
+                push!(columns, assemble_burton_miller_rhs_cuda(
+                    mesh, p1_space, dp0_space, column_q, k, rule; timing=timing, kwargs...,
+                ))
+            end
+            rhs = hcat(system.rhs, columns...)
+            CUDA.unsafe_free!(system.rhs)
+        end
+        succeeded = true
+        return merge(system, (rhs=rhs, rhs_mode=:matrix_free, rhs_operator_bytes=0))
+    finally
+        first_q === nothing || CUDA.unsafe_free!(first_q)
+        column_q === nothing || CUDA.unsafe_free!(column_q)
+        foreach(CUDA.unsafe_free!, columns)
+        if !succeeded
+            system === nothing || release_burton_miller_system_cuda!(system)
+            rhs === nothing || CUDA.unsafe_free!(rhs)
         end
     end
 end
