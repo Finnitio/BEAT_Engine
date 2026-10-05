@@ -800,6 +800,76 @@ function _flux_mass_presolve(operator, schur::AbstractMatrix, motion_columns::Ab
     return (schur_blocks=schur_blocks, motion_solution=motion_solution, split=split)
 end
 
+const _ACCELERATE_ZGEMM = Ref{Ptr{Cvoid}}(C_NULL)
+const _ACCELERATE_ZGEMM_LOOKED_UP = Ref(false)
+const _ACCELERATE_ZGEMM_LOCK = ReentrantLock()
+
+# Apple Accelerate's ILP64 "new LAPACK" `zgemm` (macOS 13.3+), or C_NULL. The legacy unsuffixed
+# entry points are never used: they are not safe under concurrent calls. The lookup and its result
+# are guarded by one lock, so concurrent first callers see either nothing yet or the final pointer.
+function _accelerate_zgemm()
+    lock(_ACCELERATE_ZGEMM_LOCK) do
+        if !_ACCELERATE_ZGEMM_LOOKED_UP[]
+            if Sys.isapple() && Sys.ARCH === :aarch64
+                handle = Base.Libc.Libdl.dlopen("/System/Library/Frameworks/Accelerate.framework/Accelerate";
+                    throw_error=false)
+                if handle !== nothing
+                    symbol = Base.Libc.Libdl.dlsym(handle, "zgemm\$NEWLAPACK\$ILP64"; throw_error=false)
+                    _ACCELERATE_ZGEMM[] = symbol === nothing ? C_NULL : symbol
+                end
+            end
+            _ACCELERATE_ZGEMM_LOOKED_UP[] = true
+        end
+        return _ACCELERATE_ZGEMM[]
+    end
+end
+
+"""
+`BLAB_COUPLED_HOST_ZGEMM` (`auto`, `accelerate`, `blas`): the library for the large ComplexF64
+interface products of the flux elimination (`B_q W`, `B_q V`). `auto` uses Apple Accelerate's
+ILP64 `zgemm` on Apple Silicon when its new-LAPACK entry point exists, and Julia's BLAS
+elsewhere. On an M1 Max, at the products' shapes (about 3,100 x k by k x k, k = 300-1,200),
+Accelerate measured 2.0-2.5x faster than OpenBLAS with eight threads, agreeing to 1e-15
+relative. Only these products change library; Julia's BLAS is untouched.
+"""
+function _host_zgemm_symbol()
+    raw = lowercase(strip(get(ENV, "BLAB_COUPLED_HOST_ZGEMM", "auto")))
+    raw in ("auto", "accelerate", "blas") ||
+        error("Unsupported BLAB_COUPLED_HOST_ZGEMM value: $raw. Expected auto, accelerate, or blas.")
+    raw == "blas" && return C_NULL
+    symbol = _accelerate_zgemm()
+    raw == "accelerate" && symbol == C_NULL &&
+        error("BLAB_COUPLED_HOST_ZGEMM=accelerate, but Accelerate's new-LAPACK zgemm is not available.")
+    return symbol
+end
+
+"""
+    _host_zgemm(A, B) -> Matrix{ComplexF64}
+
+`A * B` for ComplexF64 operands with unit row stride and a column stride at least the row count
+(so it is a valid BLAS leading dimension), through `_host_zgemm_symbol()`. Anything else (another
+element type, a non-unit row stride, a reversed or overlapping column stride) takes Julia's `*`.
+"""
+function _host_zgemm(A::AbstractMatrix, B::AbstractMatrix)
+    symbol = _host_zgemm_symbol()
+    (symbol == C_NULL || eltype(A) !== ComplexF64 || eltype(B) !== ComplexF64 ||
+     !(A isa StridedMatrix) || !(B isa StridedMatrix) || stride(A, 1) != 1 || stride(B, 1) != 1 ||
+     stride(A, 2) < max(1, size(A, 1)) || stride(B, 2) < max(1, size(B, 1))) &&
+        return A * B
+    m, k = size(A)
+    k == size(B, 1) || throw(DimensionMismatch("A has $k columns, B has $(size(B, 1)) rows"))
+    n = size(B, 2)
+    C = Matrix{ComplexF64}(undef, m, n)
+    (m == 0 || n == 0) && return C
+    k == 0 && return fill!(C, zero(ComplexF64))
+    GC.@preserve A B C ccall(symbol, Cvoid,
+        (Ref{UInt8}, Ref{UInt8}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{ComplexF64}, Ptr{ComplexF64},
+         Ref{Int64}, Ptr{ComplexF64}, Ref{Int64}, Ref{ComplexF64}, Ptr{ComplexF64}, Ref{Int64}),
+        UInt8('N'), UInt8('N'), m, n, k, one(ComplexF64), pointer(A), stride(A, 2),
+        pointer(B), stride(B, 2), zero(ComplexF64), pointer(C), max(1, m))
+    return C
+end
+
 """
     _flux_block_products!(coupled, rows, columns_of_gamma, operator, schur_blocks, interface_block, split)
 
@@ -812,7 +882,7 @@ function _flux_block_products!(coupled, rows, columns_of_gamma, operator, schur_
         coupling_columns = block.contiguous ?
                            view(interface_block, :, first(block.dofs):last(block.dofs)) :
                            interface_block[:, block.dofs]
-        block_coupling = _split_timed!(() -> coupling_columns * schur_block, split, :product)
+        block_coupling = _split_timed!(() -> _host_zgemm(coupling_columns, schur_block), split, :product)
         _split_timed!(split, :scatter) do
             for (local_column, column) in enumerate(block.rows)
                 @views coupled[rows, columns_of_gamma[column]] .+= block_coupling[:, local_column]
@@ -2179,7 +2249,7 @@ function build_condensed_coupled_system(
             )
             if transducer_count > 0
                 motion_coupling = _split_timed!(
-                    () -> interface_block * presolve.motion_solution, elimination_split, :product,
+                    () -> _host_zgemm(interface_block, presolve.motion_solution), elimination_split, :product,
                 )
                 _split_timed!(() -> (coupled[bem_range, mechanical_range] .+= motion_coupling), elimination_split, :scatter)
             end
@@ -2207,7 +2277,7 @@ function build_condensed_coupled_system(
             schur_double = nothing
             interface_block = _split_timed!(() -> ComplexF64.(bem_interface_block), elimination_split, :block_convert)
             schur_coupling, motion_coupling = _split_timed!(elimination_split, :product) do
-                (interface_block * schur_solution, interface_block * motion_solution)
+                (_host_zgemm(interface_block, schur_solution), _host_zgemm(interface_block, motion_solution))
             end
             _split_timed!(elimination_split, :scatter) do
                 for column in eachindex(bem_columns)
