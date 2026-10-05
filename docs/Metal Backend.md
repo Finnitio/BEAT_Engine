@@ -619,6 +619,27 @@ CPU-versus-Metal differences exceed their tolerances.
   The enabled compiled Metal entry loads Metal before JSON to match the bundle
   dependency order and retain its cached worker call graph. Explicit fallback
   and other backend entry orders are unchanged.
+  The shared `CompiledCoupledWorkload.jl` also decodes a two-frequency coupled
+  request using the packaged `femvolume.msh` and `exterior_conforming.msh`
+  fixtures: one FEM air volume, one BEM exterior, a conforming interface and a
+  voltage-driven Radiator transducer, with pressure, velocity, current and
+  interface-average velocity outputs. It uses CPU BEM assembly while selecting
+  the engine's Metal condensed defaults, avoiding engine GPU launches during
+  image generation. Diagnostics check MUMPS Schur condensation, CHOLMOD
+  interface mass, flux elimination and refined dense LU; failures and refinement
+  fallbacks warn. CPU uses a tiny analogue with UMFPACK in place of MUMPS.
+  Workload cleanup releases native factors and clears MUMPS pointers/live-solvers,
+  provenance and field caches; fresh-process initialization reloads MUMPS and
+  forwards LP64 BLAS again. Metal's existing device-state cleanup remains in
+  place. Measured on an M1 Max (Julia 1.12.7, fresh worker, package images already
+  built, Multi_region_SAWMOD, 10 frequencies): worker start-up plus first request
+  was 21.4 + 38.2 s on `main`, 3.8 + 19.7 s with the exterior workload alone, and
+  3.8 + 10.0-10.2 s with the coupled workload; `F2B_FLH` 3.6 + 16.7 s against
+  3.9 + 7.0 s. The remaining first-request compilation is mostly the Metal side
+  of the coupled path, which this host workload does not reach: Metal-typed
+  cache structures, `metal_host_operators` and the regular-operator orchestration,
+  and the spawned FEM stage (the workload runs it inline). Covering those needs
+  compile-only signatures traced from a Metal coupled request.
 - The generated kernel inventory is checked against production requests by
   `metal_kernel_coverage_tests.jl` in Metal hardware qualification. See the
   [bundle README](../src/beat_engine/julia_engine/BeatEngineCompiledMetalBundle/README.md)

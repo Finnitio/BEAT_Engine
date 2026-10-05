@@ -189,6 +189,32 @@ const FORCE_UNAVAILABLE = Ref(false)
 const LIVE_SOLVERS = WeakKeyDict{Any,Nothing}()
 const ATEXIT_REGISTERED = Ref(false)
 
+# Function pointers and native factors from a precompile process must never
+# survive in a package image. The next mumps_library() reloads/self-tests and
+# forwards LP64 BLAS in the new process; libblastrampoline's native tables are
+# not Julia image data. Release solvers before dropping their library pointers.
+function reset_precompile_state!()
+    for solver in collect(keys(LIVE_SOLVERS))
+        try
+            mumps_release!(solver)
+        catch exception
+            @warn "BEAT MUMPS precompile cleanup failed" exception=(exception, catch_backtrace())
+        end
+    end
+    empty!(LIVE_SOLVERS)
+    LIBRARY[] = nothing
+    ATEXIT_REGISTERED[] = false
+    return nothing
+end
+
+function __init__()
+    # Normally already empty after the workload. Do not call any serialized
+    # pointer at load time, even if a workload terminated before its cleanup.
+    empty!(LIVE_SOLVERS)
+    LIBRARY[] = nothing
+    ATEXIT_REGISTERED[] = false
+end
+
 """`BLAB_MUMPS_THREADS`, default 4: the LP64 OpenBLAS pool size used inside MUMPS calls."""
 function mumps_threads()
     raw = strip(get(ENV, "BLAB_MUMPS_THREADS", "4"))
