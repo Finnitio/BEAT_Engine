@@ -89,6 +89,7 @@ function metal_coupled_types()
         mumps_solver=cc.BeatEngineMumps.MumpsSchurSolver,
         mumps_owned=Bool,
         mumps_threads=Int,
+        mumps_blas=String,
         fem_system=SparseArrays.SparseMatrixCSC{ComplexF64, Int},
         factorization=Nothing,
         interior_system=Nothing,
@@ -138,7 +139,9 @@ function metal_coupled_types()
         fem_system_s=Float64,
         bem_operator_s=Float64,
         bem_matrix_s=Float64,
+        bem_combine_s=Float64,
         fem_condensation_s=Float64,
+        fem_task_s=Float64,
         stage_overlap=Bool,
         block_assembly_s=Float64,
         interface_elimination_s=Float64,
@@ -299,7 +302,7 @@ function metal_coupled_host_signatures()
         transducers=Vector{coupled.ElectrodynamicTransducer{Float32}},
         transducer_operators=types.transducer_operators,
         prescribed_bem_normal_velocity=SparseMatrixCSC{Float32,Int},
-        allow_transducer_condensation=Bool)
+        allow_transducer_condensation=Bool, bem_operators=Nothing)
     add(cc.solve_condensed_coupled_excitations, (types.system, Vector{NamedTuple});
         reconstruct_interior=Bool)
     add(cc._fem_system_float64,
@@ -379,8 +382,11 @@ end
 
 # Match a compiler-generated closure by its captured fields, then bind each
 # type parameter through the field it represents. Fixed Core.Box fields are
-# checked too. Aliased module bindings are deduplicated; ambiguity is an error,
-# never a guess based on a gensym number or on enumeration order.
+# checked too. Aliased module bindings are deduplicated. Anything but exactly
+# one match returns `nothing` with a warning naming the capture set, never a
+# guess based on a gensym number or on enumeration order: the inventory then
+# skips that entry instead of failing the package build, and
+# metal_coupled_precompile_coverage_tests.jl reports the lost coverage.
 function metal_captured_closure_type(mod::Module, captures::NamedTuple)
     candidates = Set{Type}()
     for name in names(mod; all=true)
@@ -402,6 +408,10 @@ function metal_captured_closure_type(mod::Module, captures::NamedTuple)
         concrete = isempty(parameters) ? wrapper : Core.apply_type(wrapper, parameters...)
         all(name -> fieldtype(concrete, name) === getproperty(captures, name), captured_names) || continue
         push!(candidates, concrete)
+    end
+    if length(candidates) != 1
+        @warn "BEAT coupled Metal precompile: closure capture set matched $(length(candidates)) types; entry skipped" mod captures=keys(captures)
+        return nothing
     end
     return only(candidates)
 end
@@ -430,8 +440,9 @@ function metal_coupled_closure_types()
         fem_system=Core.Box, normal_derivative_scale=ComplexF32, transducer_count=Int,
         interface_operators=BeatEngineCoupled.InterfaceOperators{Float32},
         gamma_fem_vertices=Vector{Int}, transducer_condensation=Bool,
-        resolved_transducer_operators=types.transducer_operators))
-    fem_task = metal_captured_closure_type(cc, (; fem_stage=fem_stage))
+        resolved_transducer_operators=types.transducer_operators,
+        fem_task_s=Base.RefValue{Float64}))
+    fem_task = fem_stage === nothing ? nothing : metal_captured_closure_type(cc, (; fem_stage=fem_stage))
     return (; timed_flux, timed_dense, solution_parts, fem_stage, fem_task)
 end
 
@@ -439,30 +450,35 @@ function metal_coupled_runtime_signatures()
     cc = BeatEngineCoupledCondensed
     types = metal_coupled_types()
     closures = metal_coupled_closure_types()
-    generator = Base.Generator{Base.OneTo{Int},closures.solution_parts}
-    signatures = Type[
-        Tuple{closures.fem_task},
-        Tuple{typeof(cc._split_timed!), closures.timed_flux, Dict{Symbol,Float64}, Symbol},
-        Tuple{typeof(cc._split_timed!), closures.timed_dense, Dict{Symbol,Float64}, Symbol},
-        Tuple{Type{Base.Generator}, closures.solution_parts, Base.OneTo{Int}},
-        Tuple{typeof(collect), generator},
-        Tuple{typeof(Base.collect_to_with_first!), Vector{types.solution}, types.solution, generator, Int},
-        Tuple{typeof(getproperty), BeatEngineCore.MetalGatherTables, Symbol},
-    ]
+    signatures = Type[Tuple{typeof(getproperty), BeatEngineCore.MetalGatherTables, Symbol}]
+    # Entries whose closure could not be resolved are skipped (see metal_captured_closure_type).
+    closures.fem_task === nothing || push!(signatures, Tuple{closures.fem_task})
+    closures.timed_flux === nothing ||
+        push!(signatures, Tuple{typeof(cc._split_timed!), closures.timed_flux, Dict{Symbol,Float64}, Symbol})
+    closures.timed_dense === nothing ||
+        push!(signatures, Tuple{typeof(cc._split_timed!), closures.timed_dense, Dict{Symbol,Float64}, Symbol})
+    if closures.solution_parts !== nothing
+        generator = Base.Generator{Base.OneTo{Int},closures.solution_parts}
+        push!(signatures,
+            Tuple{Type{Base.Generator}, closures.solution_parts, Base.OneTo{Int}},
+            Tuple{typeof(collect), generator},
+            Tuple{typeof(Base.collect_to_with_first!), Vector{types.solution}, types.solution, generator, Int})
+    end
     keyword_body = typeof(Base.bodyfunction(which(Tuple{Metal.HostKernel})))
     for (f, tt, args, size) in metal_coupled_launch_types()
         kernel = Metal.HostKernel{typeof(f),tt}
         argument_tuple = Tuple{args...}
-        closure = metal_captured_closure_type(Metal, (;
-            groups=size, threads=size, queue=Nothing, submit=Bool,
-            kernel=kernel, args=argument_tuple))
         push!(signatures,
             Tuple{keyword_body, size, size, Nothing, Bool, kernel, first(args), Vararg{Any}},
-            Tuple{Type{Metal.ObjectiveC.Foundation.NSAutoreleasePool}, closure},
             Tuple{typeof(map), typeof(Metal.mtlconvert), argument_tuple},
             Tuple{typeof(Metal.encode_arguments!), Metal.MTL.MTLComputeCommandEncoder,
                 kernel, Metal.KernelState, typeof(f), args...},
             Tuple{typeof(append!), Vector{Any}, Tuple{typeof(f),argument_tuple}})
+        closure = metal_captured_closure_type(Metal, (;
+            groups=size, threads=size, queue=Nothing, submit=Bool,
+            kernel=kernel, args=argument_tuple))
+        closure === nothing ||
+            push!(signatures, Tuple{Type{Metal.ObjectiveC.Foundation.NSAutoreleasePool}, closure})
     end
     return signatures
 end

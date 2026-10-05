@@ -17,6 +17,8 @@ end
     solvers_before = copy(mumps.LIVE_SOLVERS)
     types = bundle.metal_coupled_types()
     closures = bundle.metal_coupled_closure_types()
+    # The package build skips an unresolved closure; the test insists every one resolves.
+    @test all(closure -> closure !== nothing, values(closures))
     host = bundle.metal_coupled_host_signatures()
     runtime = bundle.metal_coupled_runtime_signatures()
     @test !isempty(host) && !isempty(runtime)
