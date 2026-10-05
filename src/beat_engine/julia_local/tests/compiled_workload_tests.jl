@@ -59,3 +59,102 @@ end
         @test outcome.solved_count == 2
     end
 end
+
+@testset "compiled coupled workload contract and condensed host coverage" begin
+    bundle = BeatEngineCompiledCpuBundle
+    # Validate the actual packaged fixture request without solving the large
+    # reference geometry in the ordinary CPU CI gate.
+    fixture = bundle.JSON.parse(bundle.JSON.json(bundle.coupled_workload_request()))
+    @test bundle.BeatEngineContract.validate_system_request(fixture) === nothing
+    @test fixture isa bundle.JSON.Object{String,Any}
+    @test fixture["compiled_system"] isa bundle.JSON.Object{String,Any}
+    @test fixture["frequencies_hz"] == [500.0, 1000.0]
+    @test all(isfile(mesh["file"]) for mesh in fixture["compiled_system"]["meshes"])
+    topology = only(fixture["compiled_system"]["interfaces"])["topology"]
+    @test !isempty(topology["fem_vertex_indices"])
+    @test topology["max_coordinate_error"] <= 1e-6
+
+    request = bundle.JSON.parse(bundle.JSON.json(bundle.coupled_workload_request(; tiny=true)))
+    @test bundle.BeatEngineContract.validate_system_request(request) === nothing
+    fem = bundle.translated_volume_mesh(request["compiled_system"]["meshes"][2], Float64)
+    @test length(fem.vertices) == 5 && length(fem.tetrahedra) == 4
+    topology = only(request["compiled_system"]["interfaces"])["topology"]
+    @test length(topology["fem_vertex_indices"]) == 3
+    @test length(topology["fem_face_indices"]) == 1
+    @test length(request["outputs"]) == 4
+    settings = bundle.coupled_workload_environment(; mumps=false)
+    withenv(settings...) do
+        # Strict gate: the precompile wrapper intentionally catches failures,
+        # so tests call the inner solve/check and let any failure reach Test.
+        run = bundle.solve_coupled_workload(request)
+        bundle.check_coupled_workload(run; mumps=false)
+        @test run.outcome.solved_count == 2
+        @test length(run.results) == 2
+        @test all(length(result["quantities"]) == 4 for result in run.results)
+    end
+    bundle.reset_compiled_workload_state!()
+    mumps = bundle.BeatEngineCoupledCondensed.BeatEngineMumps
+    @test mumps.LIBRARY[] === nothing
+    @test isempty(mumps.LIVE_SOLVERS)
+    @test !mumps.ATEXIT_REGISTERED[]
+    @test isempty(bundle.BEM_FIELD_EVALUATION_CACHES)
+    @test bundle.BeatEngineContract.BeatEngineProvenance.RUNTIME[] === nothing
+end
+
+@testset "tiny coupled request solves through compiled CPU entry and fallback" begin
+    bundle = BeatEngineCompiledCpuBundle
+    request = bundle.coupled_workload_request(; tiny=true)
+    request["frequencies_hz"] = [1000.0]
+    settings = bundle.coupled_workload_environment(; mumps=false)
+    mktempdir() do directory
+        entry = normpath(joinpath(@__DIR__, "..", "coupled_solver.jl"))
+        wrapper = joinpath(directory, "coupled_entry_test.jl")
+        write(wrapper, """
+            using Test
+            include($(repr(entry)))
+            @test BEAT_COMPILED_BUNDLE_NAME === :BeatEngineCompiledCpuBundle
+            if ENV["BLAB_BEAT_ENGINE_BUNDLE"] == "1"
+                @test BEAT_COMPILED_BUNDLE !== nothing
+                @test DRIVER === BeatEngineCompiledCpuBundle
+                @test !isdefined(Main, :BeatEngineCore)
+                mumps = DRIVER.BeatEngineCoupledCondensed.BeatEngineMumps
+                @test mumps.LIBRARY[] === nothing
+                @test isempty(mumps.LIVE_SOLVERS)
+            else
+                @test BEAT_COMPILED_BUNDLE === nothing
+                @test DRIVER === Main
+            end
+            """)
+        project = dirname(Base.active_project())
+        results = []
+        for enabled in ("1", "0")
+            command = addenv(`$(Base.julia_cmd()) --threads=1 --startup-file=no --project=$project $wrapper`,
+                settings..., "BLAB_BEAT_ENGINE_GPU_BACKEND" => "cpu", "BLAB_BEAT_ENGINE_BUNDLE" => enabled,
+                "OPENBLAS_NUM_THREADS" => "1")
+            text = read(pipeline(command; stdin=IOBuffer(bundle.JSON.json(request))), String)
+            result = bundle.JSON.parse(only(filter(!isempty, split(text, '\n'))))
+            @test result["freq_hz"] == 1000.0
+            @test result["diagnostics"]["formulation"] == "fem_interface_condensed"
+            @test result["diagnostics"]["interface_mass_solver"] == "cholmod"
+            @test length(result["quantities"]) == 4
+            @test result["excitation_port_ids"] == ["port:voltage"]
+            for quantity in result["quantities"]
+                values = quantity["values"]
+                @test values["shape"][1] == 1
+                @test values["dtype"] == "complex64"
+                decoded = reinterpret(ComplexF32, bundle.base64decode(values["content_base64"]))
+                @test all(isfinite, decoded)
+                @test any(!iszero, decoded)
+            end
+            push!(results, result)
+        end
+        # Native cached code and source fallback must preserve every complex
+        # output. Allow Float32 code-generation roundoff, never replace a baseline.
+        for (cached, fallback) in zip(results[1]["quantities"], results[2]["quantities"])
+            @test cached["id"] == fallback["id"]
+            @test cached["values"]["shape"] == fallback["values"]["shape"]
+            decode(q) = reinterpret(ComplexF32, bundle.base64decode(q["values"]["content_base64"]))
+            @test decode(cached) ≈ decode(fallback) rtol=5e-5
+        end
+    end
+end

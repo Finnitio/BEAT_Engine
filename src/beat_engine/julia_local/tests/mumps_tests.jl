@@ -67,3 +67,21 @@ end
 end
 
 include(joinpath(@__DIR__, "coupled_mumps_tests.jl"))
+
+@testset "MUMPS precompile state is released and reloads" begin
+    mumps = BeatEngineCoupledCondensed.BeatEngineMumps
+    library = mumps.mumps_library()
+    @test library.available
+    solver = mumps.MumpsSchurSolver(library; threads=1)
+    @test solver.initialized
+    mumps.reset_precompile_state!()
+    @test !solver.initialized
+    @test mumps.LIBRARY[] === nothing
+    @test isempty(mumps.LIVE_SOLVERS)
+    @test !mumps.ATEXIT_REGISTERED[]
+    reloaded = mumps.mumps_library()
+    @test reloaded.available
+    @test reloaded.version == library.version
+    @test mumps.ATEXIT_REGISTERED[]
+    mumps.reset_precompile_state!()
+end
