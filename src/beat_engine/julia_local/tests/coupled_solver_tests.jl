@@ -1147,22 +1147,24 @@ if get(ENV, "BLAB_RUN_COUPLED_METAL", "0") == "1" && metal_available()
             length(bem_mesh.faces),
             1,
         )
-        transducer = ElectrodynamicTransducer{Float32}(
+        # One definition for the FP32 solves and the Float64 reference below.
+        metal_test_transducer(::Type{T}, tag) where {T} = ElectrodynamicTransducer{T}(
             "component:metal-test",
-            [radiator_tag],
-            Float32[1],
+            [tag],
+            T[1],
             [1],
-            Float32[-1],
-            SVector(0f0, 0f0, 1f0),
-            2f0,
+            T[-1],
+            SVector{3,T}(0, 0, 1),
+            T(2),
             1,
-            6f0,
-            0.0005f0,
-            7f0,
-            0.015f0,
-            0.0005f0,
-            1f0,
+            T(6),
+            T(0.0005),
+            T(7),
+            T(0.015),
+            T(0.0005),
+            T(1),
         )
+        transducer = metal_test_transducer(Float32, radiator_tag)
         common_options = (
             quadrature_order=COUPLED_QUADRATURE_ORDER,
             singular_order=COUPLED_SINGULAR_ORDER,
@@ -1366,21 +1368,9 @@ if get(ENV, "BLAB_RUN_COUPLED_METAL", "0") == "1" && metal_available()
                 physical_tag(reference_fem_mesh, 2, "Interface"),
                 2,
             )
-            reference_transducer = ElectrodynamicTransducer{Float64}(
-                "component:metal-test",
-                [physical_tag(reference_fem_mesh, 2, "Radiator")],
-                [1.0],
-                [1],
-                [-1.0],
-                SVector(0.0, 0.0, 1.0),
-                2.0,
-                1,
-                6.0,
-                0.0005,
-                7.0,
-                0.015,
-                0.0005,
-                1.0,
+            reference_transducer = metal_test_transducer(
+                Float64,
+                physical_tag(reference_fem_mesh, 2, "Radiator"),
             )
             reference_system = build_coupled_system(
                 reference_fem_mesh,
