@@ -61,7 +61,7 @@ end
 end
 
 @testset "compiled coupled workload contract and condensed host coverage" begin
-    bundle = BeatEngineCompiledCpuBundle
+    bundle = CompiledWorkloadBundle
     # Validate the actual packaged fixture request without solving the large
     # reference geometry in the ordinary CPU CI gate.
     fixture = bundle.JSON.parse(bundle.JSON.json(bundle.coupled_workload_request()))
@@ -101,6 +101,8 @@ end
     @test bundle.BeatEngineContract.BeatEngineProvenance.RUNTIME[] === nothing
 end
 
+# The CPU compiled entry is only declared in the CPU project.
+if @isdefined(BeatEngineCompiledCpuBundle)
 @testset "tiny coupled request solves through compiled CPU entry and fallback" begin
     bundle = BeatEngineCompiledCpuBundle
     request = bundle.coupled_workload_request(; tiny=true)
@@ -157,4 +159,5 @@ end
             @test decode(cached) ≈ decode(fallback) rtol=5e-5
         end
     end
+end
 end
