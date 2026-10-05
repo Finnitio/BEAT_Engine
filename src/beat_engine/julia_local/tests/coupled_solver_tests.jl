@@ -1147,22 +1147,24 @@ if get(ENV, "BLAB_RUN_COUPLED_METAL", "0") == "1" && metal_available()
             length(bem_mesh.faces),
             1,
         )
-        transducer = ElectrodynamicTransducer{Float32}(
+        # One definition for the FP32 solves and the Float64 reference below.
+        metal_test_transducer(::Type{T}, tag) where {T} = ElectrodynamicTransducer{T}(
             "component:metal-test",
-            [radiator_tag],
-            Float32[1],
+            [tag],
+            T[1],
             [1],
-            Float32[-1],
-            SVector(0f0, 0f0, 1f0),
-            2f0,
+            T[-1],
+            SVector{3,T}(0, 0, 1),
+            T(2),
             1,
-            6f0,
-            0.0005f0,
-            7f0,
-            0.015f0,
-            0.0005f0,
-            1f0,
+            T(6),
+            T(0.0005),
+            T(7),
+            T(0.015),
+            T(0.0005),
+            T(1),
         )
+        transducer = metal_test_transducer(Float32, radiator_tag)
         common_options = (
             quadrature_order=COUPLED_QUADRATURE_ORDER,
             singular_order=COUPLED_SINGULAR_ORDER,
@@ -1352,10 +1354,62 @@ if get(ENV, "BLAB_RUN_COUPLED_METAL", "0") == "1" && metal_available()
                 cpu_voltage_solution.bem_pressure,
                 metal_voltage_solution.bem_pressure,
             ) < 5e-4
-            @test relative_error(
-                cpu_voltage_solution.interface_flux,
-                metal_voltage_solution.interface_flux,
-            ) < 2e-3 # This FP32 fixture's coupled matrix has cond(A, 1) ~= 3.8e9.
+            reference_fem_mesh = load_gmsh41_volume(
+                joinpath(COUPLED_FIXTURE_ROOT, "femvolume.msh"),
+                0.001,
+            )
+            reference_bem_mesh = load_gmsh22_with_tags(
+                joinpath(COUPLED_FIXTURE_ROOT, "exterior_conforming.msh"),
+                0.001,
+            )
+            reference_interface_map = build_conforming_interface_map(
+                reference_fem_mesh,
+                reference_bem_mesh,
+                physical_tag(reference_fem_mesh, 2, "Interface"),
+                2,
+            )
+            reference_transducer = metal_test_transducer(
+                Float64,
+                physical_tag(reference_fem_mesh, 2, "Radiator"),
+            )
+            reference_system = build_coupled_system(
+                reference_fem_mesh,
+                reference_bem_mesh,
+                reference_interface_map,
+                500.0,
+                343.0,
+                1.21;
+                quadrature_order=COUPLED_QUADRATURE_ORDER,
+                singular_order=COUPLED_SINGULAR_ORDER,
+                validation_diagnostics=false,
+                bulk_loss_factor=0.01,
+                prescribed_bem_normal_velocity=Float64.(prescribed_bem_normal_velocity),
+                transducers=[reference_transducer],
+                bem_backend=:cpu,
+            )
+            try
+                reference_excitation = merge(voltage_excitation, (
+                    fem_boundary_weights=Float64[],
+                    amplitude=ComplexF64(voltage_excitation.amplitude),
+                ))
+                reference_voltage_solution = only(
+                    solve_coupled_excitations(reference_system, [reference_excitation]),
+                )
+                # cond(A, 1) ~= 3.8e9: measured CPU32 error is 1.52e-3 and
+                # Metal32 errors are 1.29e-3 to 1.56e-3 against Float64.
+                # Bound each solve against Float64; FP32-vs-FP32 combines their errors.
+                voltage_flux_tolerance = 2e-3
+                @test relative_error(
+                    reference_voltage_solution.interface_flux,
+                    cpu_voltage_solution.interface_flux,
+                ) < voltage_flux_tolerance
+                @test relative_error(
+                    reference_voltage_solution.interface_flux,
+                    metal_voltage_solution.interface_flux,
+                ) < voltage_flux_tolerance
+            finally
+                release_coupled_system!(reference_system)
+            end
             @test relative_error(
                 cpu_voltage_solution.diaphragm_velocity,
                 metal_voltage_solution.diaphragm_velocity,
