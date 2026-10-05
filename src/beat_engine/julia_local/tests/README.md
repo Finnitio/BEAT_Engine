@@ -148,3 +148,36 @@ and report applied pair count, maximum order and selected image-transform count
 in result diagnostics. The source option rejects CUDA, ROCm and Metal before
 loading geometry or devices. Existing explicit compiled proximity inputs and
 CUDA single-cache entry points retain their contracts.
+
+
+## Compiled-worker dispatch qualification
+
+`scripts/validate_compiled_reachability.py --julia <executable> --backend <cpu|metal> --out <json>`
+is a manual hardware gate that starts real compiled workers and requires their
+expected bundle in both readiness and result diagnostics. It checks independent ports, off/xy symmetry, operator
+parity, explicit source fallback, and Float64 CPU scalar-reference agreement.
+Run it on a host with the selected backend available and its Julia environment
+instantiated. It is not part of ordinary CI.
+
+`compiled_driver_closure_tests.jl` runs in the CPU `runtests.jl` gate and can
+also run standalone with the `julia_local` project. It resolves all three driver
+closure types used by the Metal runtime precompile inventory from their captured
+fields, using the same lookup and field tuples. It requires no GPU or Metal
+package and performs no solves or kernel launches.
+
+Compiled exterior CPU `direct_system` now reaches the existing fused assembler,
+regular/singular SIMD kernels and transposed scatter, with the existing CPU LU
+solve policy. `operator_matrices` remains an explicit route (regular SIMD,
+scalar operator singular corrections). CPU exterior field evaluation selects
+its SIMD kernel; coupled field calls retain their scalar default. The controls
+`BLAB_BEAT_CPU_{REGULAR,SINGULAR,FIELD}_KERNEL=scalar` retain scalar access. The
+compiled CPU workload exercises the parsed JSON request, rather than Julia Dict
+values that differ from production decoding. Its SIMD assertions assume the
+default `BLAB_BEAT_CPU_{REGULAR,SINGULAR,FIELD}_KERNEL` settings (unset, selecting
+`simd`).
+
+Readiness and results report `compiled_worker` with requested/loaded bundle,
+driver mode and fallback reason. Bundle load errors also warn on stderr. CUDA
+and ROCm report that they have no compiled bundle; `BLAB_BEAT_ENGINE_BUNDLE=0`
+reports the explicit disable. This is reachability evidence, not a startup or
+performance claim.
