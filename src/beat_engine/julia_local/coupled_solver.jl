@@ -3346,6 +3346,9 @@ function solve_request_impl(request; event_mode=false)
                 "mumps_threads" => isnothing(coupled_system.condensation) ||
                                    !hasproperty(coupled_system.condensation, :mumps_threads) ?
                                    0 : coupled_system.condensation.mumps_threads,
+                "mumps_blas" => isnothing(coupled_system.condensation) ||
+                                !hasproperty(coupled_system.condensation, :mumps_blas) ?
+                                nothing : coupled_system.condensation.mumps_blas,
                 "fem_schur_block_size" => isnothing(coupled_system.condensation) ||
                                           !hasproperty(
                     coupled_system.condensation,
