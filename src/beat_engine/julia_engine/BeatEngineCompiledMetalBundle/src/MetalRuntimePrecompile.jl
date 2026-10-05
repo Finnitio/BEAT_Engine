@@ -110,6 +110,9 @@ function metal_runtime_signatures()
         kernel = args[2]
         function_type = kernel.parameters[1]
         host_args = args[3:end]
+        # The coupled HostKernel entries keep the trace's erased trailing arguments (`Vararg{Any}`);
+        # their exact encode/convert/append signatures come from metal_coupled_runtime_signatures().
+        any(arg -> arg isa Core.TypeofVararg, host_args) && continue
         push!(signatures, Tuple{typeof(Metal.encode_arguments!), Metal.MTL.MTLComputeCommandEncoder,
             kernel, Metal.KernelState, function_type, host_args...})
         push!(signatures, Tuple{typeof(Base.map), typeof(Metal.mtlconvert), Tuple{host_args...}})
