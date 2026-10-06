@@ -57,6 +57,8 @@ function metal_coupled_types()
     cache = _metal_namedtuple_type((;
         base=base,
         quadrature_bundles=Dict{Int, Any},
+        metal_combined_identity_store=Dict{Int, Any},
+        metal_combined_identity_lock=ReentrantLock,
         base_quadrature_order=Int,
         singular_order=Int,
         timings=cache_timings,
@@ -192,6 +194,8 @@ function metal_coupled_types()
         prescribed_bem_rhs=Matrix{ComplexF32},
         prescribed_bem_neumann=SparseArrays.SparseMatrixCSC{ComplexF32, Int},
         bem_backend=Symbol,
+        coupled_bem_assembly=Symbol,
+        coupled_bem_assembly_fallback_reason=Nothing,
         linear_backend=Symbol,
         symmetry_mode=Symbol,
         cache=cache,
@@ -270,9 +274,30 @@ function metal_coupled_types()
         host_copy_of=Symbol,
         metal_backing=operators,
     ))
+    # Combined A/C assembly (BLAB_METAL_COUPLED_BEM_ASSEMBLY, the Metal default).
+    scatter = core.MetalSparseScatterCache{Metal.MtlArray{Int32, 1, Metal.PrivateStorage},
+        Metal.MtlArray{Int32, 1, Metal.PrivateStorage}, Metal.MtlArray{ComplexF32, 1, Metal.PrivateStorage}}
+    combined_identity = _metal_namedtuple_type((; p1_p1=scatter, p1_dp0=scatter))
+    combined_device = _metal_namedtuple_type((;
+        a=Metal.MtlArray{ComplexF32, 2, Metal.SharedStorage},
+        c=Metal.MtlArray{ComplexF32, 2, Metal.SharedStorage},
+        on_gpu=Bool,
+        gpu_backend=Symbol,
+        assembly_mode=Symbol,
+    ))
+    combined_host = _metal_namedtuple_type((;
+        a=Matrix{ComplexF32},
+        c=Matrix{ComplexF32},
+        on_gpu=Bool,
+        metal_backing=_metal_namedtuple_type((;
+            a=Metal.MtlArray{ComplexF32, 2, Metal.SharedStorage},
+            c=Metal.MtlArray{ComplexF32, 2, Metal.SharedStorage})),
+    ))
+    combined_operators = _metal_namedtuple_type((; combined=combined_device))
     return (; cache_timings, transducer_operators, base, cache, quadrature_bundle, prepared,
         condensation_timings, condensation, mass_block, mass_operator, elimination,
-        system_timings, system, solution, operators, device_operators, host_operators)
+        system_timings, system, solution, operators, device_operators, host_operators,
+        combined_identity, combined_device, combined_host, combined_operators)
 end
 
 function metal_coupled_host_signatures()
@@ -317,6 +342,21 @@ function metal_coupled_host_signatures()
         add(getproperty, (type, Symbol))
     end
     add(hasproperty, (types.system, Symbol))
+    add(get, (types.system, Symbol, Nothing))
+
+    # Combined A/C assembly, in the build and on the sweep pipeline's producer task.
+    add(cc._condensed_bem_assembly_plan, (types.cache, types.prepared, Type{Float32}, Int))
+    for identity in (types.combined_identity, Nothing)
+        add(cc._assemble_condensed_bem_operators, (core.BoundaryMesh{Float32}, types.prepared, Float32, Int);
+            combined_identity=identity)
+    end
+    add(cc._combine_condensed_bem_operators!, (types.combined_operators, types.prepared, Float32))
+    add(cc.assemble_condensed_bem_operators, (core.BoundaryMesh{Float32}, types.cache, Float32, Float32);
+        regular_quadrature_order=Int, singular_order=Int)
+    add(core.assemble_coupled_burton_miller_metal, (core.BoundaryMesh{Float32}, types.prepared, Float32);
+        identity_cache=types.combined_identity)
+    add(core.metal_host_coupled_burton_miller, (types.combined_device,))
+    add(core.release_metal_coupled_burton_miller!, (types.combined_host,))
 
     # 107.1 / 197.7 / 131.6 ms, plus gather drivers. Only types are constructed.
     add(core.assemble_regular_galerkin_operators,
