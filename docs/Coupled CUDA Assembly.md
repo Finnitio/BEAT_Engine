@@ -3,9 +3,10 @@
 Coupled CUDA solves with full-matrix diagnostics disabled default to direct
 assembly of the combined Burton–Miller pressure operator A and flux operator C.
 This applies to both the monolithic CUDA solve and the CUDA/cuDSS statically
-condensed FEM-BEM-LEM solve. CPU, ROCm, and Metal retain individual-operator
-assembly; Metal assembles those operators on the GPU and runs the coupled
-algebra on the host (see [Metal Backend](Metal%20Backend.md)).
+condensed FEM-BEM-LEM solve. CPU and ROCm retain individual-operator assembly. Condensed Metal solves have
+a separate environment-controlled combined A/C path with host sparse projection;
+monolithic Metal solves retain individual operators. See
+[Metal Backend](Metal%20Backend.md).
 The exterior-only `burton_miller_assembly` option is independent.
 
 ## Formulation and data flow

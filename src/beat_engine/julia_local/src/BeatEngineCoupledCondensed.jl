@@ -35,6 +35,7 @@ using ..BeatEngineCore
 using ..BeatEngineCoupled
 
 include(joinpath(@__DIR__, "BeatEngineCondensedAssembly.jl"))
+include(joinpath(@__DIR__, "BeatEngineMetalCoupledHost.jl"))
 include(joinpath(@__DIR__, "BeatEngineMumps.jl"))
 using .BeatEngineMumps
 
@@ -1614,6 +1615,10 @@ function prepare_condensed_coupled_cache(
     return (
         base=base,
         quadrature_bundles=bundles,
+        metal_combined_identity_store=Dict{Int,Any}(),
+        # A sweep that assembles the BEM stage on a producer task (the coupled sweep pipeline)
+        # reaches this store from two tasks.
+        metal_combined_identity_lock=ReentrantLock(),
         base_quadrature_order=quadrature_order,
         singular_order=singular_order,
         timings=timings,
@@ -1627,6 +1632,14 @@ function prepare_condensed_coupled_cache(
 end
 
 function release_condensed_coupled_cache!(cache)
+    if hasproperty(cache, :metal_combined_identity_store)
+        lock(cache.metal_combined_identity_lock) do
+            for identity in values(cache.metal_combined_identity_store)
+                BeatEngineCore.release_metal_coupled_identity_cache!(identity)
+            end
+            empty!(cache.metal_combined_identity_store)
+        end
+    end
     # Extra bundles (orders other than the base) own their own device caches
     # under Metal; host bundles are reclaimed by the collector. The base cache
     # still owns whatever `prepare_coupled_cache` allocated.
@@ -1680,12 +1693,49 @@ function _stage_overlap_enabled(bem_backend::Symbol)
 end
 
 """
-    _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+    _condensed_bem_assembly_plan(condensed_cache, prepared, T, quadrature_order) -> (plan, identity)
+
+`BLAB_METAL_COUPLED_BEM_ASSEMBLY` for one condensed frequency: `plan.mode` is `:combined` (Metal
+assembles A and C directly; `identity` is the cached identity scatter for this quadrature order) or
+`:operators` (the four operators; `identity` is `nothing`), with `plan.fallback_reason` when `auto`
+could not use the combined path. The build and the sweep pipeline's producer resolve it alike.
+"""
+function _condensed_bem_assembly_plan(condensed_cache, prepared, ::Type{T}, quadrature_order::Int) where {T}
+    plan = if prepared.bem_backend == :metal
+        requested = get(ENV, "BLAB_METAL_COUPLED_BEM_ASSEMBLY", "auto")
+        # Operators bypass support probes, preserving the diagnostic/reference path.
+        reason = lowercase(strip(requested)) == "operators" ? nothing :
+                 BeatEngineCore.metal_coupled_combined_support_reason(prepared, T)
+        resolve_metal_coupled_bem_assembly(requested, reason)
+    else
+        (mode=:operators, fallback_reason=nothing)
+    end
+    if plan.mode == :combined && !hasproperty(condensed_cache, :metal_combined_identity_store)
+        # The identity scatter cache lives in the condensed cache; without one there is no owner.
+        plan = (mode=:operators, fallback_reason="the coupled cache has no combined identity store")
+    end
+    plan.mode == :combined || return plan, nothing
+    # A sweep that assembles the BEM stage on a producer task reaches the store from two tasks.
+    identity = lock(condensed_cache.metal_combined_identity_lock) do
+        get!(condensed_cache.metal_combined_identity_store, quadrature_order) do
+            BeatEngineCore.build_metal_coupled_identity_cache(prepared, T)
+        end
+    end
+    return plan, identity
+end
+
+"""
+    _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order; combined_identity=nothing)
 
 The BEM stage of one condensed frequency: the four regular Galerkin operators as host matrices.
 Metal assembles them on the GPU; the CPU uses this solver's own fork of the regular assembly.
+With a `combined_identity` (`_condensed_bem_assembly_plan`), Metal instead assembles the
+Burton-Miller A and C directly, returned as `(combined=...,)` device storage.
 """
-function _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order::Int)
+function _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order::Int; combined_identity=nothing)
+    isnothing(combined_identity) || return (combined=BeatEngineCore.assemble_coupled_burton_miller_metal(
+        bem_mesh, prepared, wavenumber; identity_cache=combined_identity,
+    ),)
     return if prepared.bem_backend == :metal
         # Metal assembles the four operators on the GPU; the condensed algebra
         # below is CPU-only, so bring them down and free the device copies.
@@ -1731,6 +1781,18 @@ The Burton-Miller combination of one frequency's four operators and the interfac
 `-C Q`, as fresh host arrays. Frees the operators' Metal buffers: nothing reads them afterwards.
 """
 function _combine_condensed_bem_operators!(operators, prepared, wavenumber)
+    if hasproperty(operators, :combined)
+        # A = 0.5Mpp - D + alpha H and C = S + alpha (adjD + 0.5Mpq); the operator path's
+        # right-hand-side operator is -C. Owned host copies, then the device storage is freed.
+        try
+            host = BeatEngineCore.metal_host_coupled_burton_miller(operators.combined)
+            bem_flux = prepared.interface_operators.bem_flux
+            size(host.c, 2) == size(bem_flux, 1) || error("Metal combined flux map must have one row per DP0 dof.")
+            return copy(host.a), -host.c, host.c * Complex{typeof(wavenumber)}.(bem_flux)
+        finally
+            BeatEngineCore.release_metal_coupled_burton_miller!(operators.combined)
+        end
+    end
     bem_lhs, bem_rhs_operator = burton_miller_neumann_matrices(
         operators,
         prepared.identity_p1_p1,
@@ -1772,7 +1834,10 @@ function assemble_condensed_bem_operators(
         error("Condensed coupled cache singular order does not match the requested singular order.")
     prepared = merge(cache.base, bundle)
     wavenumber = (T(2pi) * frequency_hz) / sound_speed
-    operators = _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+    _, combined_identity = _condensed_bem_assembly_plan(cache, prepared, T, order)
+    operators = _assemble_condensed_bem_operators(
+        bem_mesh, prepared, wavenumber, singular_order; combined_identity=combined_identity,
+    )
     bem_lhs, bem_rhs_operator, bem_interface_block = _combine_condensed_bem_operators!(operators, prepared, wavenumber)
     return (
         bem_lhs=bem_lhs,
@@ -1894,6 +1959,10 @@ function build_condensed_coupled_system(
         error("Coupled cache symmetry mode does not match requested symmetry.")
     prepared.retained_fem_vertices == retained_fem_vertices ||
         error("Coupled cache retained FEM vertices do not match the current moving surfaces.")
+
+    assembly_plan, combined_identity = _condensed_bem_assembly_plan(condensed_cache, prepared, T, selected_quadrature_order)
+    assembly_plan.fallback_reason === nothing || push!(optimization_fallbacks,
+        "combined Metal BEM assembly not used: " * assembly_plan.fallback_reason)
 
     omega = T(2pi) * frequency_hz
     wavenumber = omega / sound_speed
@@ -2038,7 +2107,9 @@ function build_condensed_coupled_system(
         bem_operator_started = time_ns()
         prefetched = nothing
         operators = if isnothing(bem_operators)
-            _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+            _assemble_condensed_bem_operators(
+                bem_mesh, prepared, wavenumber, singular_order; combined_identity=combined_identity,
+            )
         else
             # Assembled and combined ahead by the sweep pipeline (`assemble_condensed_bem_operators`);
             # waiting for it here keeps the FEM task above overlapping whatever is still in flight.
@@ -2359,6 +2430,8 @@ function build_condensed_coupled_system(
         prescribed_bem_rhs=bem_prescribed_rhs,
         prescribed_bem_neumann=bem_prescribed_neumann,
         bem_backend=prepared.bem_backend,
+        coupled_bem_assembly=assembly_plan.mode,
+        coupled_bem_assembly_fallback_reason=assembly_plan.fallback_reason,
         linear_backend=:cpu,
         symmetry_mode=prepared.symmetry_mode,
         cache=condensed_cache,

@@ -94,6 +94,10 @@ end
         :release_metal_burton_miller_system!,
         :metal_host_operators,
         :evaluate_galerkin_field_metal_multi,
+        :assemble_coupled_burton_miller_metal,
+        :metal_host_coupled_burton_miller,
+        :release_metal_coupled_burton_miller!,
+        :metal_coupled_combined_support_reason,
     )
         @test isdefined(Engine, name)
     end
@@ -198,5 +202,26 @@ end
         end
         @test isempty(Engine.evaluate_galerkin_field_metal_multi([], mesh, [], [], one(T), cache))
         @test length(Engine.evaluate_galerkin_field_metal_multi([], mesh, fill(pressure, 9), fill(neumann, 9), one(T), cache)) == 9
+    end
+end
+
+include(joinpath(@__DIR__, "metal_coupled_host_tests.jl"))
+
+@testset "combined coupled Metal support probes need no GPU" begin
+    @test Engine.metal_coupled_combined_support_reason(nothing, Float64) ==
+          "combined Metal assembly requires Float32"
+    withenv("BLAB_METAL_ASSEMBLY_MODE" => "host_staged") do
+        @test Engine.metal_coupled_combined_support_reason(nothing, Float32) == "host-staged assembly requested"
+    end
+    withenv("BLAB_METAL_ASSEMBLY_MODE" => "native", "BLAB_METAL_REGULAR_KERNEL_MODE" => "entry_owned") do
+        @test Engine.metal_coupled_combined_support_reason(nothing, Float32) == "reference regular kernel mode requested"
+    end
+    withenv("BLAB_METAL_ASSEMBLY_MODE" => "native", "BLAB_METAL_REGULAR_KERNEL_MODE" => "pair_gather",
+            "BLAB_METAL_SINGULAR_MODE" => "host") do
+        @test Engine.metal_coupled_combined_support_reason(nothing, Float32) == "host singular mode requested"
+    end
+    withenv("BLAB_METAL_ASSEMBLY_MODE" => "native", "BLAB_METAL_REGULAR_KERNEL_MODE" => "pair_gather",
+            "BLAB_METAL_SINGULAR_MODE" => "native", "BLAB_METAL_SINGULAR_WRITEBACK" => "scatter") do
+        @test Engine.metal_coupled_combined_support_reason(nothing, Float32) == "singular scatter write-back requested"
     end
 end

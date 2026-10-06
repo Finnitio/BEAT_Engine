@@ -181,3 +181,18 @@ driver mode and fallback reason. Bundle load errors also warn on stderr. CUDA
 and ROCm report that they have no compiled bundle; `BLAB_BEAT_ENGINE_BUNDLE=0`
 reports the explicit disable. This is reachability evidence, not a startup or
 performance claim.
+
+The CPU-only combined Metal policy/projection tests are
+`metal_coupled_host_tests.jl` (also included by `runtests.jl` and
+`metal_host_tests.jl`). They load only standard libraries, with no GPU:
+
+```sh
+julia --threads=1 --startup-file=no src/beat_engine/julia_local/tests/metal_coupled_host_tests.jl
+```
+
+Metal combined A/C qualification is
+`scripts/validate_metal_coupled_combined.jl` under the `julia_metal` project.
+It compares matrix/projection and full condensed coupled results for `off/x/xy`
+and both phasors, with explicit matrix and solution tolerances. Run accelerator
+qualification, the reference gate and benchmark jobs through the job broker
+when a machine brief requires it.

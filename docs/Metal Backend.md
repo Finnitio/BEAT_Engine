@@ -39,19 +39,19 @@ regular kernels) fall back to it. Diagnostics report the effective mode and a
 `linear_solver` of `metal_assembly_cpu_dense_lu` or `metal_assembly_cpu_dense_gmres`.
 The `BLAB_BEAT_FUSED_BM` variable below governs the source-request driver only.
 
-Coupled solves keep `coupled_bem_assembly = operators`. The combined A/C
-assembly is a CUDA device-block path; Metal assembles the four operators on the
-GPU and runs the coupled algebra and the FEM static condensation on the host
-through `metal_host_operators`, so requesting `combined` on Metal fails clearly.
-See [Coupled CUDA Assembly](Coupled%20CUDA%20Assembly.md).
+Condensed coupled solves select direct A/C assembly with
+`BLAB_METAL_COUPLED_BEM_ASSEMBLY=auto|combined|operators` (see below).
+The request option `coupled_bem_assembly` remains the CUDA control; it does not
+select this Metal path. Monolithic Metal solves and full-matrix validation
+continue to assemble individual operators.
 
 ## Execution model
 
 Exterior solves take the fused Burton-Miller path described below, which never
-forms the four operators. The four-operator path described here is still what
-coupled FEM-BEM-LEM solves, the `host_staged` assembly fallback and the `host`
-singular mode use, and `BLAB_BEAT_FUSED_BM=0` selects it for exterior solves
-too.
+forms the four operators. The four-operator path described here remains the
+reference for coupled solves and is used by monolithic coupled solves, `host_staged` assembly and
+the `host` singular mode. `BLAB_BEAT_FUSED_BM=0` selects it for exterior solves
+too; condensed coupled solves have their own control below.
 
 The worker prepares mesh topology, quadrature rules, symmetry transforms, and
 frequency-independent cache data on the CPU. The Metal path then:
@@ -78,8 +78,9 @@ frequency-independent cache data on the CPU. The Metal path then:
 
 Coupled solves take the CPU backend's shape with the BEM stage moved to the
 GPU: sparse FEM assembly and the UMFPACK interior Schur complement run on the
-CPU, the four BEM operators are assembled on Metal and wrapped on the host,
-and the retained coupled system is factored with the CPU dense LU. The
+CPU, the combined BEM matrices are assembled on Metal and wrapped on the host,
+and the retained coupled system is factored with the CPU dense LU. The original
+four-operator route remains available as a reference and diagnostic fallback. The
 condensed formulation is the default, exactly as for the CPU backend, and the
 monolithic formulation remains available for validation. Interior-FEM-only
 solves have no BEM stage and run on the CPU path unchanged.
@@ -104,6 +105,118 @@ The host arrays alias device memory, so the operator storage is released once,
 through whichever tuple the caller still holds: the host tuple returned by
 `metal_host_operators` owns the buffers it wrapped, and freeing the device
 tuple while those views are still live leaves them dangling.
+
+### Combined coupled Burton-Miller assembly (condensed solves)
+
+`BeatEngineMetalCoupledBurtonMiller.jl` reuses the exterior fused regular and
+Duffy pair arithmetic and the cached gather tables, retaining the flux
+coefficient rather than multiplying it by a known drive. With P1 pressure
+(N rows) and DP0 flux (F columns), it assembles
+
+```text
+A = 0.5 Mpp - D + alpha H
+C = S + alpha (adjD + 0.5 Mpq)
+A p + C Q q_interface + C bem_motion_flux v = -C prescribed_neumann
+```
+
+For positive physical k, alpha is +i/k under `exp(-i omega t)` and -i/k under
+`exp(+i omega t)`. The kernels receive the signed outgoing k, exactly as the
+existing exterior fused path does. Interface orientation, FEM condensation,
+MUMPS, dense refinement and pivoted LU remain unchanged.
+
+Regular pairs accumulate 24 real components (nine complex A entries and three
+complex -C entries), rather than 48 for S/D/adjD/H. The same fused pair buffer,
+trial chunks and deterministic P1 gather are reused. A new gather retains each
+DP0 column with one owner per cell. Singular pairs use the existing fused Duffy
+blocks, with the existing P1/P1 and P1/DP0 correction maps and deterministic
+entry gather. Direct and image-singular pairs use the same skip rules, reflected
+normal/curl signs and quadrature as the operator path. Operator row weights
+are applied before sparse identity scatter; that pass also changes -C to C.
+The identity matrices already carry their symmetry weights. Their sparse device
+scatter caches are created once per selected quadrature order on first combined
+use, owned by the condensed cache and freed with it. That first-use setup is
+included in `fem_system_s`; subsequent frequencies reuse it.
+
+**Variant: retain C, project on the host.** A and C occupy shared Metal storage
+by default, so the host wraps them without copying. The host reads C to form
+`C*Q`, `C*bem_motion_flux` and `-C*prescribed_neumann`; Q stays sparse. A is
+copied once into an owned host matrix before the device buffers are freed,
+so all blocks survive assembly storage release. Private storage copies A/C
+at host entry and follows the same ownership rule. C is then released; the
+condensed build retains only the projected blocks. No four-operator host
+combination or dense Q is allocated.
+
+Dense device outputs fall from `2N² + 2NF` to `N² + NF` complex values
+(ComplexF32 is eight bytes), while pair scratch uses 96 instead of 192 bytes
+per pair at a fixed chunk width. The existing budget-based chunk chooser may
+use the same scratch budget with twice the width. During projection the host
+also holds one `N²` copy of A and `N*I` interface entries, plus small motion and
+prescribed blocks, where I is the interface column count. Retaining C costs
+`N*F` rather than only `N*I`; this first step avoids adding a new Metal sparse
+projection kernel and keeps the host projections identical to the reference.
+Device projection could reduce host bandwidth further when I is much smaller
+than F. **Symmetry images still use separate pair launches and gathers**,
+following the existing Metal exterior machinery; fusing multiple images into
+one accumulator set remains future work. This is a smaller port than CUDA's
+fully image-fused, device-projected implementation.
+
+`auto` selects combined for Float32, native assembly, `pair_gather`, native
+singular correction, gather write-back, 1/3/6-point triangle rules and `off`,
+`x`, `xy` symmetry. Unsupported configurations use operators and record
+`coupled_bem_assembly_fallback_reason` plus an optimization fallback reason.
+`combined` requires support and errors with the reason otherwise. `operators`
+runs the original four-operator path. Results report the effective
+`coupled_bem_assembly`; image fusion is false. Full-matrix diagnostics still
+require the monolithic formulation and use operators; the existing prohibition
+on full diagnostics with static condensation is unchanged. Restart persistent
+workers after updating the numerical sources; both new sources enter the
+existing source-hash walk.
+
+Expected numerical differences are Float32 summation-order round-off: combination
+now occurs before outer-product expansion and gather, rather than after four
+independent sums. The qualification gate is `norm(delta) <= 1e-12 +
+5e-6*norm(reference)` for A, C and the projected blocks, matching the existing
+fused exterior gate's relative tolerance. This is an expected fixture bound,
+not a universal bound for cancellation or an ill-conditioned solve. Full
+solution gates are 1e-3 relative with 1e-7 absolute, and 2e-3 for interface flux,
+following the coupled validation's conditioning allowance. No precision or
+pivoting is weakened to meet these gates.
+
+`validate_metal_coupled_combined.jl` compares A/C and all three projection signs,
+then complete condensed prescribed-velocity, complex voltage and prescribed-BEM
+source solutions on the bundled coupled fixtures for `off/x/xy` and both phasor
+conventions. The full fixtures span the mirror planes, so symmetry arms translate
+both meshes together into a valid positive fundamental domain (separate mirrored
+objects). A small tetrahedral matrix check with vertices on the planes covers
+orbit weights and image-singular corrections, shared/private storage, multiple
+trial chunks, q1/q2 rules and singular part splits. The script rejects nonfinite
+outputs and shape differences and exits nonzero on a failed gate. CPU-only
+policy, projection signs, empty maps, gather indexing and output ownership tests are in
+`tests/metal_coupled_host_tests.jl`; Metal bundle support probes also run without
+a functional GPU in `tests/metal_host_tests.jl`.
+
+Measured on an M1 Max (eight Julia threads), Multi_region_SAWMOD, 40 frequencies
+from 20 Hz to 20 kHz, warm worker, sequential sweep, interleaved runs
+(operators / combined / combined / operators; the first pair ran beside another
+machine load and is listed for completeness):
+
+| | Four operators | Combined |
+| --- | ---: | ---: |
+| Sweep (clean pair) | 65.5 s | **51.8 s** |
+| Sweep (loaded pair) | 75.1 s | 58.5 s |
+| `bem_operator_s` (GPU stage) | 0.81 s | 0.32 s |
+| `bem_matrix_s` (host projection) | 0.09 s | 0.15-0.16 s |
+| Peak worker memory | 4.9-5.0 GB | 4.3 GB |
+
+`validate_metal_coupled_combined.jl` passes for `off`, `x` and `xy` with both
+phasor conventions: A and C agree with the four-operator path to about 3e-7
+relative (Float32 summation order) and the coupled solutions to 1e-7-5e-6; its
+sweep check keeps one system alive while two more frequencies assemble on the
+same cache, one of them on another task, and requires the first system's answer
+to be unchanged. Under the coupled sweep pipeline the GPU stage is already
+hidden; there the gain is the smaller producer and less memory traffic beside
+the host stages.
+
 ### Fused Burton-Miller assembly (exterior solves)
 
 The coupling eta = i/k is known at assembly time, so the exterior path forms
@@ -346,9 +459,9 @@ factoring. `beat_metal` is in both `PHYSICAL_SYSTEM_BACKEND_IDS` and
 Metal has no GPU LU, so the driver routes a condensing Metal solve the same
 way it routes `beat_cpu`: `coupled_solver.jl` selects the condensed solver for
 `:cpu` and `:metal` alike, and `build_condensed_coupled_system` in
-`BeatEngineCoupledCondensed.jl` does the work. The only Metal-specific step is
-the BEM operators, which are assembled on the GPU and handed back as host
-matrices through `metal_host_operators`. The partition, the interior UMFPACK
+`BeatEngineCoupledCondensed.jl` does the work. The Metal-specific BEM stage assembles combined A/C by default and projects
+C on the host. Its four-operator reference path hands matrices back through
+`metal_host_operators`. The partition, the interior UMFPACK
 factorization and the blocked Schur complement are the shared
 `_blocked_umfpack_schur_complement` in `BeatEngineCoupled.jl`. Diagnostics
 report `fem_condensation_backend: cpu_umfpack` and
@@ -658,6 +771,7 @@ Normal application use does not require these environment variables.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `BLAB_METAL_COUPLED_BEM_ASSEMBLY` | `auto` | Condensed coupled BEM: `auto` selects combined A/C when supported, otherwise operators with a recorded reason; `combined` requires support; `operators` runs the original path. |
 | `BLAB_METAL_ASSEMBLY_MODE` | `native` | Use `host_staged` to assemble operators on the CPU and upload them as a diagnostic fallback. |
 | `BLAB_METAL_REGULAR_KERNEL_MODE` | `pair_gather` | Use `pair_atomic` for the fused atomic kernel, `pair_owned` for the deterministic colored kernels, or `entry_owned` as the correctness reference. |
 | `BLAB_METAL_SINGULAR_MODE` | `native` | Use `host` to compute the Duffy singular corrections on the CPU and add them to the device operators, separating kernel defects from rule defects. |
@@ -692,7 +806,7 @@ Normal application use does not require these environment variables.
 | `BLAB_MUMPS_BLAS` | `auto` | LP64 BLAS behind MUMPS: `auto` is Apple Accelerate on Apple Silicon and `OpenBLAS32_jll` elsewhere; `accelerate` or `openblas` asks for one. |
 | `BLAB_MUMPS_THREADS` / `BLAB_MUMPS_SOLVE_THREADS` | `4` / `1` | OpenBLAS threads for the MUMPS factorization and solve phases (Accelerate schedules its own). |
 | `BLAB_SCHUR_BLOCK` | unset | Coupled solves: pins the Schur complement right-hand-side block width, bypassing the thread-count balancing. For measurement only. |
-| `BLAB_BEAT_FUSED_BM` | `1` | Set to `0` to assemble the four operators and combine them on the host for exterior solves. Coupled solves, `host_staged` assembly and the `host` singular mode always take the four-operator path. |
+| `BLAB_BEAT_FUSED_BM` | `1` | Set to `0` to assemble the four operators and combine them on the host for exterior solves. Exterior `host_staged` assembly and the `host` singular mode take the four-operator path. Condensed coupled solves use `BLAB_METAL_COUPLED_BEM_ASSEMBLY`. |
 
 The fused system is then solved by the adaptive dense solve described at the
 head of [`BeatEngineDenseSolve.jl`](../src/beat_engine/julia_local/src/BeatEngineDenseSolve.jl) — dense LU or
@@ -728,6 +842,7 @@ CPU-versus-Metal validation scripts:
 | `validate_metal_packed_exterior.jl` | Concurrent assemblies sharing geometry caches, multi-drive field parity through the eight-drive batch boundary, and input length validation. |
 | `validate_metal_exterior.jl` | Operators (both singular modes), boundary pressure, residual, and exterior field for an exterior solve. |
 | `validate_metal_symmetry.jl` | X and XY reduced-domain assembly and solve parity, both singular modes. |
+| `validate_metal_coupled_combined.jl` | Combined versus operators: A/C, sparse and complex projections, full condensed velocity/voltage/source solutions; `off/x/xy`, both phasors, plane weights and image-singular corrections, shared/private storage and chunk boundaries. |
 | `validate_metal_coupled.jl` | Coupled FEM-BEM-LEM assembly, condensation, solution, and field for the monolithic and condensed paths, prescribed-velocity and voltage excitations. |
 | `validate_metal_sweep_pipeline.jl` | The sweep assembly pipeline at depths 1-4: steps delivered in order with their own frequency, and pipelined assemblies against sequential ones. |
 | `validate_metal_exterior_pipeline.jl` | A compiled exterior request solved sequentially and overlapped at depths 1-4 through the worker: every output bit-identical and labelled with its own frequency. `BLAB_VALIDATE_SYMMETRY` picks the arm. |
