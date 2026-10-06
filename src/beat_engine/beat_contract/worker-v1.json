@@ -59,7 +59,8 @@
   ],
   "optional_output_quantities": [
     "interface_average_normal_velocity",
-    "interface_radiated_pressure"
+    "interface_radiated_pressure",
+    "radiation_impedance_matrix"
   ],
   "request_transports": [
     "file",

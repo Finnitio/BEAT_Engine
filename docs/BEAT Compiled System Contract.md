@@ -223,3 +223,54 @@ operators. Unsupported modes/backends fail before frequency assembly. See
 `direct_system` selects the fused assembler described in
 [Metal Backend](Metal%20Backend.md), and `coupled_bem_assembly` resolves to
 `operators`.
+
+## Exterior ideal-source radiation impedance matrix
+
+Workers may advertise the additive `radiation_impedance_matrix` optional output
+quantity. Clients must negotiate this capability before submission; compiled
+system versions 1 and 2 and result version 2 are unchanged. This output requires
+an exterior-only system containing only `ideal_velocity_source` components.
+Exterior `electrodynamic_transducer` requests fail explicitly, including undriven
+transducers. `passive_radiator` is not implemented and fails in every solve kind.
+Both server validation and the independent Python contract enforce these rules.
+
+Request `{"id":"zrad","quantity":"radiation_impedance_matrix","target_ids":[],"options":{}}`.
+Empty targets select every excited ideal component in compiled `components`
+order. Explicit targets select the same ordered subset for both rows and columns;
+unknown, duplicate or unexcited targets fail. Unexcited ideal boundaries stay
+rigid. Multiple ports on one component share its unit-velocity basis. Solve
+requests require at least one excitation port.
+
+The complex array has shape `[N,N]`, units `N*s/m` and axes
+`["receiver_component","source_component"]`, without an excitation axis. For
+unit component velocity, the definition is
+
+`Z_ij = c_i * sum_f w_i(f) * A_f * (p_j[v1]+p_j[v2]+p_j[v3])/3`.
+
+Here `p_j` is the returned multi-RHS boundary pressure for component j, including
+all symmetry images. `w_i` is its boundary motion weight for `uniform_normal`, or
+that weight times `normal dot motion_axis` for `rigid_translation`. The projection
+has one sign. `c_i = physical_radiator_count`: 1 for off and rigid ground, 2 for x,
+and 4 for xy. Ground images contribute pressure but are not physical radiators.
+Thus ideal rows integrate total force over all physical copies and the diagonal
+matches the existing `radiation_impedance` self loads to round-off. Integration
+uses Float64 on the host; this does not recover accuracy lost in Float32 BEM.
+
+Metadata supplies `component_ids`, `kinds`, `row_weights`, `definition` and
+`phasor_convention`. The definition is
+`total_force_on_physical_radiators_per_unit_velocity_of_all_copies`. Every ideal
+row has `W_ii = 1`. Future transducer rows will instead integrate force per copy
+using completion factors and use physical orbit counts as row weights. The
+matrix is neither symmetrized nor made passive. Its metadata diagnostics are
+`reciprocity_max_rel = max(abs(W*Z - transpose(W*Z)))/max(abs(W*Z))` (zero for a
+zero matrix), and `passivity_min_eig`, the minimum eigenvalue of
+`(W*Z + (W*Z)')/2`, in `N*s/m`. Numerical discretization can introduce reciprocity
+or passivity errors. Both `exp(+i omega t)` and `exp(-i omega t)` are supported;
+real-velocity responses conjugate between these conventions.
+
+The existing `radiation_impedance` retains its original shape, units, `radiator`
+axis and compiled component ordering. It requires **every compiled component to
+be excited** and refuses otherwise with a clear error; it never shrinks that
+axis. Use the matrix output when only an excited subset is wanted. Transducer
+networks, passive radiators and bounded/coupled matrix outputs are not supported
+by this addition.

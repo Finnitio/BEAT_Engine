@@ -1671,6 +1671,329 @@
           ]
         }
       ]
+    },
+    {
+      "name": "ideal_exterior_impedance_matrix",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "zrad",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [],
+              "options": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "impedance_matrix_unknown_target",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "zrad",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [
+                "missing"
+              ],
+              "options": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "impedance_matrix_unexcited_target",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "zrad",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [
+                "component:unexcited"
+              ],
+              "options": {}
+            }
+          ]
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components"
+          ],
+          "value": [
+            {
+              "id": "component:source",
+              "name": "Source",
+              "kind": "ideal_velocity_source",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {}
+            },
+            {
+              "id": "component:unexcited",
+              "name": "Source",
+              "kind": "ideal_velocity_source",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "impedance_matrix_duplicate_target",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "zrad",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [
+                "component:source",
+                "component:source"
+              ],
+              "options": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "impedance_matrix_empty_excitation",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "zrad",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [],
+              "options": {}
+            }
+          ]
+        },
+        {
+          "path": [
+            "excitation_port_ids"
+          ],
+          "value": []
+        }
+      ]
+    },
+    {
+      "name": "self_impedance_unexcited_refusal",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "zrad",
+              "quantity": "radiation_impedance",
+              "target_ids": [],
+              "options": {}
+            }
+          ]
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components"
+          ],
+          "value": [
+            {
+              "id": "component:source",
+              "name": "Source",
+              "kind": "ideal_velocity_source",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {}
+            },
+            {
+              "id": "component:unexcited",
+              "name": "Source",
+              "kind": "ideal_velocity_source",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "exterior_transducer_refused_v1",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        }
+      ]
+    },
+    {
+      "name": "exterior_transducer_refused_v2_unrequested",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 2
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components"
+          ],
+          "value": [
+            {
+              "id": "component:source",
+              "name": "Source",
+              "kind": "ideal_velocity_source",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {}
+            },
+            {
+              "id": "component:undriven",
+              "name": "Source",
+              "kind": "electrodynamic_transducer",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "passive_radiator_not_implemented",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "passive_radiator"
+        }
+      ]
+    },
+    {
+      "name": "passive_radiator_coupled_not_implemented",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions"
+          ],
+          "value": [
+            {
+              "id": "region:exterior",
+              "name": "Exterior",
+              "kind": "unbounded_air",
+              "mesh_ids": [
+                "mesh:exterior"
+              ],
+              "volume_groups": [],
+              "sound_speed_m_per_s": 343.0,
+              "density_kg_per_m3": 1.21,
+              "loss_model": {}
+            },
+            {
+              "id": "region:bounded",
+              "name": "Exterior",
+              "kind": "bounded_air",
+              "mesh_ids": [
+                "mesh:exterior"
+              ],
+              "volume_groups": [],
+              "sound_speed_m_per_s": 343.0,
+              "density_kg_per_m3": 1.21,
+              "loss_model": {}
+            }
+          ]
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "passive_radiator"
+        }
+      ]
+    },
+    {
+      "name": "impedance_matrix_bounded_refusal",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "z",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [],
+              "options": {}
+            }
+          ]
+        }
+      ]
     }
   ]
 }

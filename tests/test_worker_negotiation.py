@@ -267,3 +267,25 @@ def test_interface_radiation_requires_advertised_output(ready, payload):
     ready["optional_output_quantities"].remove("interface_radiated_pressure")
     with pytest.raises(WorkerCompatibilityError, match="interface radiation"):
         negotiate_submission(ready, payload, "solve")
+
+
+def test_impedance_matrix_requires_advertised_output(ready, payload):
+    payload["outputs"] = [{"id": "z", "quantity": "radiation_impedance_matrix", "target_ids": [], "options": {}}]
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+    for missing_list in (False, True):
+        old_ready = copy.deepcopy(ready)
+        if missing_list:
+            old_ready.pop("optional_output_quantities")
+        else:
+            old_ready["optional_output_quantities"].remove("radiation_impedance_matrix")
+        with pytest.raises(WorkerCompatibilityError, match="radiation_impedance_matrix"):
+            negotiate_submission(old_ready, payload, "solve")
+    payload["outputs"] = []
+    assert negotiate_submission(old_ready, payload, "solve")["result_schema_version"] == 2
+
+
+@pytest.mark.parametrize("capabilities", ["radiation_impedance_matrix", None, {}, [1], [""]])
+def test_rejects_malformed_optional_output_announcements(ready, capabilities):
+    ready["optional_output_quantities"] = capabilities
+    with pytest.raises(WorkerCompatibilityError, match="optional_output_quantities"):
+        validate_worker_ready(ready)

@@ -10,6 +10,7 @@ using .BeatEngineWorkerCleanup
 include(joinpath(@__DIR__, "src", "BeatEngineCore.jl"))
 using .BeatEngineCore
 include(joinpath(@__DIR__, "compiled_ground_contract.jl"))
+include(joinpath(@__DIR__, "exterior_lumped_network.jl"))
 include(joinpath(@__DIR__, "src", "BeatEngineCoupled.jl"))
 using .BeatEngineCoupled
 include(joinpath(@__DIR__, "src", "BeatEngineCoupledCondensed.jl"))
@@ -1321,6 +1322,12 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                             ["excitation", "bem_face"],
                         ),
                     )
+                elseif quantity == "radiation_impedance_matrix"
+                    matrix, metadata = exterior_impedance_matrix(
+                        mesh, pressures, excitations, components, output["target_ids"], symmetry_mode,
+                    )
+                    push!(quantities, quantity_wire(output, matrix, "N*s/m",
+                        ["receiver_component", "source_component"]; metadata=metadata))
                 elseif quantity == "radiation_impedance"
                     impedance_by_component = Complex{FloatType}[]
                     pressure_by_component = Dict(

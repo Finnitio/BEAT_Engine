@@ -6,6 +6,7 @@ using StaticArrays
 using LinearAlgebra
 
 include(joinpath(@__DIR__, "contract_tests.jl"))
+include(joinpath(@__DIR__, "exterior_impedance_matrix_tests.jl"))
 include(joinpath(@__DIR__, "worker_cleanup_tests.jl"))
 include(joinpath(@__DIR__, "deploy_rhs_policy_tests.jl"))
 include(joinpath(@__DIR__, "exterior_rhs_policy_tests.jl"))

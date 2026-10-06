@@ -123,13 +123,47 @@ function references(values, available, path)
 end
 
 function source_profile_version(system)
-    system["contract_version"] == 2 && return nothing
+    system["contract_version"] >= 2 && return nothing
     for component in system["components"]
         component["kind"] == "ideal_velocity_source" || continue
         parameters = component["parameters"]
         haskey(parameters, "motion_profile") || haskey(parameters, "motion_axis") || continue
         fail("compiled_system.components.$(component["id"]).parameters",
             "source motion profiles require compiled-system contract version 2")
+    end
+    return nothing
+end
+
+function component_support(system)
+    exterior = !any(region["kind"] == "bounded_air" for region in system["regions"])
+    for component in system["components"]
+        path = "compiled_system.components.$(component["id"])"
+        component["kind"] == "passive_radiator" && fail(path, "passive_radiator is not implemented")
+        exterior && component["kind"] == "electrodynamic_transducer" &&
+            fail(path, "exterior electrodynamic_transducer is not implemented")
+    end
+    return nothing
+end
+
+function impedance_outputs(request)
+    system = request["compiled_system"]
+    excited = Set(port["component_id"] for port in system["excitation_ports"]
+        if port["id"] in request["excitation_port_ids"])
+    components = Dict(component["id"] => component for component in system["components"])
+    exterior = !any(region["kind"] == "bounded_air" for region in system["regions"])
+    for output in request["outputs"]
+        quantity = output["quantity"]
+        if quantity == "radiation_impedance_matrix"
+            exterior && all(component["kind"] == "ideal_velocity_source" for component in values(components)) ||
+                fail("request.outputs", "radiation_impedance_matrix requires an exterior ideal-source-only system")
+            targets = output["target_ids"]
+            references(targets, components, "request.outputs.target_ids")
+            all(target in excited for target in targets) ||
+                fail("request.outputs.target_ids", "radiation_impedance_matrix targets must be excited")
+        elseif quantity == "radiation_impedance" && exterior
+            all(id in excited for id in keys(components)) || fail("request.outputs",
+                "radiation_impedance requires every compiled component to be excited; radiator axis remains compiled component order")
+        end
     end
     return nothing
 end
@@ -172,8 +206,10 @@ function validate_system_request(request)
     validate(request, SCHEMA["\$defs"]["solve_request"], "request")
     source_profile_version(request["compiled_system"])
     graph(request["compiled_system"])
+    component_support(request["compiled_system"])
     references(request["excitation_port_ids"], Dict(port["id"] => port for port in request["compiled_system"]["excitation_ports"]), "request.excitation_port_ids")
     unique_ids([output["id"] for output in request["outputs"]], "request.outputs")
+    impedance_outputs(request)
     return nothing
 end
 
