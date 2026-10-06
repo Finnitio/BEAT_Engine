@@ -825,6 +825,18 @@ function _accelerate_zgemm()
     end
 end
 
+# A package image stores the pointer as C_NULL but keeps the flag, so a fresh process would never
+# look it up again. Reset both in every new process and after a precompile workload.
+function reset_accelerate_zgemm!()
+    lock(_ACCELERATE_ZGEMM_LOCK) do
+        _ACCELERATE_ZGEMM[] = C_NULL
+        _ACCELERATE_ZGEMM_LOOKED_UP[] = false
+    end
+    return nothing
+end
+
+__init__() = reset_accelerate_zgemm!()
+
 """
 `BLAB_COUPLED_HOST_ZGEMM` (`auto`, `accelerate`, `blas`): the library for the large ComplexF64
 interface products of the flux elimination (`B_q W`, `B_q V`). `auto` uses Apple Accelerate's
@@ -843,6 +855,9 @@ function _host_zgemm_symbol()
         error("BLAB_COUPLED_HOST_ZGEMM=accelerate, but Accelerate's new-LAPACK zgemm is not available.")
     return symbol
 end
+
+"""`"accelerate"` or `"blas"`: the library `_host_zgemm` uses for ComplexF64 products here."""
+host_zgemm_path() = _host_zgemm_symbol() == C_NULL ? "blas" : "accelerate"
 
 """
     _host_zgemm(A, B) -> Matrix{ComplexF64}

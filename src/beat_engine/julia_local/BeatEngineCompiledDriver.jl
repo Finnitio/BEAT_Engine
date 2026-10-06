@@ -3494,6 +3494,7 @@ function solve_request_impl(request; event_mode=false)
                     [t.reconstruction_error for t in radiation_traces] : nothing,
                 "coupled_bem_assembly" => hasproperty(coupled_system, :coupled_bem_assembly) ? String(coupled_system.coupled_bem_assembly) : "operators",
                 "coupled_bem_assembly_fallback_reason" => get(coupled_system, :coupled_bem_assembly_fallback_reason, nothing),
+                "coupled_host_zgemm" => BeatEngineCoupledCondensed.host_zgemm_path(),
                 "coupled_bem_image_fusion" => hasproperty(coupled_system, :coupled_bem_image_fusion) && coupled_system.coupled_bem_image_fusion,
                 "coupled_bem_max_registers" => hasproperty(coupled_system, :coupled_bem_max_registers) ? coupled_system.coupled_bem_max_registers : 0,
                 "linear_backend" => String(coupled_system.linear_backend),

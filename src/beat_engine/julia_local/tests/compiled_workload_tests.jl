@@ -142,8 +142,8 @@ if @isdefined(BeatEngineCompiledCpuBundle)
             @test result["excitation_port_ids"] == ["port:voltage"]
             for quantity in result["quantities"]
                 values = quantity["values"]
-                @test values["shape"][1] == 1
-                @test values["dtype"] == "complex64"
+                @test effective["shape"][1] == 1
+                @test effective["dtype"] == "complex64"
                 decoded = reinterpret(ComplexF32, bundle.base64decode(values["content_base64"]))
                 @test all(isfinite, decoded)
                 @test any(!iszero, decoded)
@@ -160,4 +160,29 @@ if @isdefined(BeatEngineCompiledCpuBundle)
         end
     end
 end
+end
+
+@testset "coupled workload environment clears inherited overrides (strict)" begin
+    bundle = CompiledWorkloadBundle
+    inherited = ("BLAB_COUPLED_DENSE_REFINEMENT" => "0", "BLAB_COUPLED_FEM_SOLVER" => "umfpack",
+                 "BLAB_MUMPS_THREADS" => "2", "BLAB_COUPLED_WORKLOAD_TEST_EXTRA" => "x")
+    withenv(inherited...) do
+        for mumps in (false, true)
+            settings = bundle.coupled_workload_environment(; mumps)
+            @test allunique(first.(settings))
+            effective = Dict(settings)
+            @test effective["BLAB_COUPLED_FEM_SOLVER"] == (mumps ? "mumps" : "umfpack")
+            @test effective["BLAB_COUPLED_DENSE_REFINEMENT"] == "auto"
+            @test effective["BLAB_MUMPS_THREADS"] === nothing
+            @test effective["BLAB_COUPLED_WORKLOAD_TEST_EXTRA"] === nothing
+            @test effective["BLAB_COUPLED_STAGE_OVERLAP"] == "off"
+            withenv(settings...) do
+                @test ENV["BLAB_COUPLED_FEM_SOLVER"] == (mumps ? "mumps" : "umfpack")
+                @test ENV["BLAB_COUPLED_DENSE_REFINEMENT"] == "auto"
+                @test !haskey(ENV, "BLAB_MUMPS_THREADS") && !haskey(ENV, "BLAB_COUPLED_WORKLOAD_TEST_EXTRA")
+            end
+            # The caller's environment comes back unchanged.
+            @test all(ENV[name] == value for (name, value) in inherited)
+        end
+    end
 end
