@@ -144,6 +144,9 @@ function precompile_workload()
     # CPU BEM assembly avoids a GPU launch during image generation. Resolve
     # the Metal condensed defaults explicitly, including sequential MUMPS.
     precompile_coupled_workload(; tiny=false, mumps=true)
+    # This bundle also serves beat_cpu coupled requests on the Mac, whose defaults
+    # differ (Float32 FEM, UMFPACK): cache that configuration too.
+    precompile_coupled_workload(; tiny=true, mumps=false, defaults=:cpu)
     precompile(run_worker, ())
     precompile_metal_host_signatures()
     precompile_metal_runtime_signatures()

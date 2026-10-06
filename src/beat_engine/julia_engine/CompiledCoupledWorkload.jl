@@ -124,10 +124,12 @@ function coupled_workload_request(; tiny::Bool=false, bem_backend::String="cpu")
             "static_condensation" => true, "symmetry" => "off"))
 end
 
-# Resolve the engine's Metal defaults with installation-machine overrides
-# cleared, then apply them to CPU BEM assembly. Never launch an engine kernel
-# while generating a package image (as in the exterior workload).
-function coupled_workload_environment(; mumps::Bool)
+# Resolve the engine's defaults for `defaults` (`:metal` or `:cpu`, the backend
+# whose configuration the workload should cache) with installation-machine
+# overrides cleared, then apply them to CPU BEM assembly. Never launch an engine
+# kernel while generating a package image (as in the exterior workload).
+function coupled_workload_environment(; mumps::Bool, defaults::Symbol=:metal)
+    defaults in (:metal, :cpu) || error("coupled workload defaults must be :metal or :cpu; got $defaults")
     cc = BeatEngineCoupledCondensed
     modes = (
         "BLAB_COUPLED_TRANSDUCER_CONDENSATION" => cc._transducer_condensation_mode,
@@ -150,7 +152,7 @@ function coupled_workload_environment(; mumps::Bool)
     # would come back cleared instead of with the caller's value.
     cleared = unique!(vcat(inherited, [name for (name, _) in modes]))
     resolved = withenv((name => nothing for name in cleared)...) do
-        Dict(name => string(select(:metal)) for (name, select) in modes)
+        Dict(name => string(select(defaults)) for (name, select) in modes)
     end
     # One entry per name, applied in order: clear the inherited override, then the resolved
     # workload default, then the host workload's own solver and overlap choices.
@@ -177,7 +179,7 @@ function solve_coupled_workload(request)
     end
 end
 
-function check_coupled_workload(run; mumps::Bool)
+function check_coupled_workload(run; mumps::Bool, defaults::Symbol=:metal)
     @assert !run.outcome.cancelled
     @assert run.outcome.solved_count == 2 && length(run.results) == 2
     for result in run.results
@@ -187,7 +189,8 @@ function check_coupled_workload(run; mumps::Bool)
         @assert d["linear_solver"] == (mumps ? "cpu_mumps_seq_schur_plus_dense_lu" : "cpu_umfpack_schur_plus_dense_lu") d
         @assert d["interface_elimination"] == "flux" d
         @assert d["interface_mass_solver"] == "cholmod" d
-        @assert d["fem_matrix_precision"] == "float64" d
+        # Metal assembles the FEM matrices in Float64; beat_cpu keeps Float32 (UMFPACK is far slower in Float64).
+        @assert d["fem_matrix_precision"] == (defaults == :metal ? "float64" : "float32") d
         @assert d["transducer_count"] == 1 && d["interface_count"] == 1 d
         @assert d["fem_interior_reconstruction"] == "skipped" d
         @assert isempty(d["coupled_optimization_fallback_reasons"]) d
@@ -198,7 +201,7 @@ function check_coupled_workload(run; mumps::Bool)
     end
     mumps && @assert run.results[2]["diagnostics"]["fem_symbolic_analysis_reused"]
     d = run.results[end]["diagnostics"]
-    @info "BEAT compiled coupled workload complete" frequencies=length(run.results) fem_condensation_backend=d["fem_condensation_backend"] interface_mass_solver=d["interface_mass_solver"] dense_solver=d["dense_solver"]
+    @info "BEAT compiled coupled workload complete" defaults frequencies=length(run.results) fem_condensation_backend=d["fem_condensation_backend"] interface_mass_solver=d["interface_mass_solver"] dense_solver=d["dense_solver"]
     return nothing
 end
 
@@ -222,14 +225,14 @@ function reset_compiled_workload_state!()
     return nothing
 end
 
-function precompile_coupled_workload(; tiny::Bool, mumps::Bool)
+function precompile_coupled_workload(; tiny::Bool, mumps::Bool, defaults::Symbol=:metal)
     try
         request = JSON.parse(JSON.json(coupled_workload_request(; tiny)))
-        withenv(coupled_workload_environment(; mumps)...) do
-            check_coupled_workload(solve_coupled_workload(request); mumps)
+        withenv(coupled_workload_environment(; mumps, defaults)...) do
+            check_coupled_workload(solve_coupled_workload(request); mumps, defaults)
         end
     catch exception
-        @warn "BEAT compiled coupled workload failed" tiny mumps exception=(exception, catch_backtrace())
+        @warn "BEAT compiled coupled workload failed" tiny mumps defaults exception=(exception, catch_backtrace())
     finally
         try
             reset_compiled_workload_state!()

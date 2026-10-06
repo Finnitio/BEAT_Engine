@@ -184,5 +184,23 @@ end
             # The caller's environment comes back unchanged.
             @test all(ENV[name] == value for (name, value) in inherited)
         end
+        # The beat_cpu configuration: the same reductions with Float32 FEM and UMFPACK.
+        cpu = Dict(bundle.coupled_workload_environment(; mumps=false, defaults=:cpu))
+        @test cpu["BLAB_COUPLED_FEM_FLOAT64"] == "off" && cpu["BLAB_COUPLED_FEM_SOLVER"] == "umfpack"
+        @test cpu["BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION"] == "auto" && cpu["BLAB_COUPLED_INTERFACE_MASS_SOLVER"] == "cholmod"
+        @test cpu["BLAB_COUPLED_DENSE_REFINEMENT"] == "auto" && cpu["BLAB_MUMPS_THREADS"] === nothing
+        @test all(ENV[name] == value for (name, value) in inherited)
     end
+    @test_throws "defaults" bundle.coupled_workload_environment(; mumps=false, defaults=:cuda)
+end
+
+@testset "tiny coupled workload with beat_cpu defaults solves (strict)" begin
+    bundle = CompiledWorkloadBundle
+    request = bundle.JSON.parse(bundle.JSON.json(bundle.coupled_workload_request(; tiny=true)))
+    withenv(bundle.coupled_workload_environment(; mumps=false, defaults=:cpu)...) do
+        run = bundle.solve_coupled_workload(request)
+        bundle.check_coupled_workload(run; mumps=false, defaults=:cpu)
+        @test all(result["diagnostics"]["fem_matrix_precision"] == "float32" for result in run.results)
+    end
+    bundle.reset_compiled_workload_state!()
 end
