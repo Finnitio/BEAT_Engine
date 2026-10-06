@@ -219,150 +219,152 @@
 end
 
 if get(ENV, "BLAB_RUN_COUPLED_REFERENCE", "0") == "1"
-    @testset "Condensed MUMPS Schur backend matches UMFPACK and monolithic" begin
-        fem_mesh = load_gmsh41_volume(joinpath(CONDENSED_FIXTURE_ROOT, "femvolume.msh"), 0.001)
-        bem_mesh = load_gmsh22_with_tags(joinpath(CONDENSED_FIXTURE_ROOT, "exterior_conforming.msh"), 0.001)
-        interface_map = build_conforming_interface_map(
-            fem_mesh, bem_mesh, physical_tag(fem_mesh, 2, "Interface"), 2,
-        )
-        radiator_tag = physical_tag(fem_mesh, 2, "Radiator")
-        options = (quadrature_order=CONDENSED_QUADRATURE_ORDER, singular_order=CONDENSED_SINGULAR_ORDER)
-        relative(reference, candidate) = norm(ComplexF64.(candidate) .- ComplexF64.(reference)) /
-                                         max(norm(ComplexF64.(reference)), eps(Float64))
-        transducer = ElectrodynamicTransducer{Float64}(
-            "component:test", [radiator_tag], [1.0], [1], [-1.0], SVector(0.0, 0.0, 1.0),
-            2.0, 1, 6.0, 0.0005, 7.0, 0.015, 0.0005, 1.0,
-        )
-        velocity = (kind=:normal_velocity, radiator_tag=radiator_tag, transducer_index=0, amplitude=ComplexF64(0.3, -0.2))
-        voltage = (kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=ComplexF64(1, 0))
-        voltage_b = (kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=ComplexF64(-0.4, 1.3))
-        fields = (:fem_pressure, :bem_pressure, :interface_flux, :bem_neumann, :diaphragm_velocity, :voice_coil_current)
-        mumps = "BLAB_COUPLED_FEM_SOLVER" => "mumps"
-        umfpack = "BLAB_COUPLED_FEM_SOLVER" => "umfpack"
-        tc = "BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1"
-        scenarios = (
-            (label="plain", switches=(), transducers=ElectrodynamicTransducer{Float64}[], excitations=[velocity]),
-            (label="retained transducer", switches=(), transducers=[transducer], excitations=[voltage, velocity]),
-            (label="transducer condensation", switches=(tc,), transducers=[transducer], excitations=[voltage, velocity]),
-            (label="tc + pressure elimination", switches=(tc, "BLAB_COUPLED_INTERFACE_PRESSURE_ELIMINATION" => "1"),
-                transducers=[transducer], excitations=[voltage, velocity, voltage_b]),
-            (label="tc + flux elimination", switches=(tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1"),
-                transducers=[transducer], excitations=[voltage, velocity, voltage_b]),
-            (label="plain + flux elimination", switches=("BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",),
-                transducers=ElectrodynamicTransducer{Float64}[], excitations=[velocity]),
-            (label="tc + flux + dense f64 + overlap", switches=(tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
-                    "BLAB_COUPLED_DENSE_FLOAT64" => "1", "BLAB_COUPLED_STAGE_OVERLAP" => "on"),
-                transducers=[transducer], excitations=[voltage, velocity]),
-            (label="tc + flux specialized + dense f64 + overlap", switches=(tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
-                    "BLAB_COUPLED_DENSE_FLOAT64" => "1", "BLAB_COUPLED_STAGE_OVERLAP" => "on",
-                    "BLAB_COUPLED_INTERFACE_MASS_SOLVER" => "cholmod", "BLAB_COUPLED_INTERFACE_BLOCKS" => "1",
-                    "BLAB_COUPLED_INTERFACE_MASS_OVERLAP" => "1"),
-                transducers=[transducer], excitations=[voltage, velocity, voltage_b]),
-            (label="plain + flux blocks, mass in FEM stage", switches=("BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
-                    "BLAB_COUPLED_INTERFACE_BLOCKS" => "1", "BLAB_COUPLED_INTERFACE_MASS_OVERLAP" => "1"),
-                transducers=ElectrodynamicTransducer{Float64}[], excitations=[velocity]),
-        )
-        for scenario in scenarios
-            @testset "$(scenario.label)" begin
-                transducer_operators = assemble_transducer_operators(fem_mesh, bem_mesh, scenario.transducers)
-                retained = sort(unique(vcat(
-                    interface_map.fem_vertex_indices,
-                    isempty(scenario.transducers) ? Int[] : findnz(transducer_operators.fem_surface)[1],
-                )))
-                cache_for(switches...) = withenv(switches...) do
-                    prepare_condensed_coupled_cache(fem_mesh, bem_mesh, interface_map; options..., retained_fem_vertices=retained)
-                end
-                umfpack_cache = cache_for(umfpack)
-                mumps_cache = cache_for(mumps)
-                try
-                    # Three frequencies through one cache: the first analyses, the rest refactor.
-                    for (index, frequency) in enumerate((600.0, 900.0, 350.0))
-                        build(cache, switch) = withenv(switch, scenario.switches...) do
-                            build_condensed_coupled_system(
-                                fem_mesh, bem_mesh, interface_map, frequency, 343.0, 1.21;
-                                options..., cache=cache, transducers=scenario.transducers,
-                            )
-                        end
-                        reference_system = index == 1 ? build_coupled_system(
-                            fem_mesh, bem_mesh, interface_map, frequency, 343.0, 1.21;
-                            options..., validation_diagnostics=false, bem_backend=:cpu,
-                            transducers=scenario.transducers,
-                        ) : nothing
-                        baseline = build(umfpack_cache, umfpack)
-                        candidate = build(mumps_cache, mumps)
-                        try
-                            @test candidate.condensation.backend == :mumps_seq
-                            @test isnothing(candidate.condensation.fem_solver_fallback_reason)
-                            @test candidate.condensation.analysis_reused == (index > 1)
-                            @test candidate.condensation.mumps_solver === mumps_cache.mumps_store[:solver]
-                            @test candidate.solved_system_order == baseline.solved_system_order
-                            @test relative(baseline.condensation.schur, candidate.condensation.schur) < 1e-10
-                            baselines = solve_condensed_coupled_excitations(baseline, scenario.excitations)
-                            candidates = solve_condensed_coupled_excitations(candidate, scenario.excitations)
-                            references = isnothing(reference_system) ? baselines :
-                                         solve_coupled_excitations(reference_system, scenario.excitations)
-                            for (reference, base_solution, solution) in zip(references, baselines, candidates)
-                                for field in fields
-                                    getproperty(solution, field) isa AbstractArray || continue
-                                    isempty(getproperty(solution, field)) && continue
-                                    @test relative(getproperty(base_solution, field), getproperty(solution, field)) < 1e-9
-                                    @test relative(getproperty(reference, field), getproperty(solution, field)) < 1e-9
-                                end
-                                @test solution.fem_interior_residual < 1e-10
-                                @test solution.fem_rhs_condensation_s >= 0 && solution.fem_reconstruction_s >= 0
-                            end
-                        finally
-                            isnothing(reference_system) || release_coupled_system!(reference_system)
-                            release_condensed_coupled_system!(baseline)
-                            release_condensed_coupled_system!(candidate)
-                        end
-                    end
-                    @test mumps_cache.mumps_store[:solver].analysis_count == 1
-                    @test mumps_cache.mumps_store[:solver].initialized
-                finally
-                    solver = get(mumps_cache.mumps_store, :solver, nothing)
-                    release_condensed_coupled_cache!(umfpack_cache)
-                    release_condensed_coupled_cache!(mumps_cache)
-                    @test isempty(mumps_cache.mumps_store)
-                    @test !isnothing(solver) && !solver.initialized
-                end
-            end
-        end
-
-        # Single-precision operators with the double-precision dense LU: MUMPS and UMFPACK factor
-        # the same promoted values, so they agree far below the Float32 operator error.
-        fem_mesh32 = load_gmsh41_volume(joinpath(CONDENSED_FIXTURE_ROOT, "femvolume.msh"), Float32(0.001))
-        bem_mesh32 = load_gmsh22_with_tags(joinpath(CONDENSED_FIXTURE_ROOT, "exterior_conforming.msh"), Float32(0.001))
-        interface_map32 = build_conforming_interface_map(
-            fem_mesh32, bem_mesh32, physical_tag(fem_mesh32, 2, "Interface"), 2,
-        )
-        transducer32 = ElectrodynamicTransducer{Float32}(
-            "component:test", [physical_tag(fem_mesh32, 2, "Radiator")], Float32[1], [1], Float32[-1],
-            SVector(0f0, 0f0, 1f0), 2f0, 1, 6f0, 0.0005f0, 7f0, 0.015f0, 0.0005f0, 1f0,
-        )
-        best = (tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
-        build32(switch) = withenv(switch, best...) do
-            build_condensed_coupled_system(
-                fem_mesh32, bem_mesh32, interface_map32, 700f0, 343f0, 1.21f0;
-                options..., transducers=[transducer32],
+    with_baseline_cpu_coupled() do
+        @testset "Condensed MUMPS Schur backend matches UMFPACK and monolithic" begin
+            fem_mesh = load_gmsh41_volume(joinpath(CONDENSED_FIXTURE_ROOT, "femvolume.msh"), 0.001)
+            bem_mesh = load_gmsh22_with_tags(joinpath(CONDENSED_FIXTURE_ROOT, "exterior_conforming.msh"), 0.001)
+            interface_map = build_conforming_interface_map(
+                fem_mesh, bem_mesh, physical_tag(fem_mesh, 2, "Interface"), 2,
             )
-        end
-        baseline32 = build32(umfpack)
-        candidate32 = build32(mumps)
-        try
-            @test candidate32.condensation.backend == :mumps_seq
-            @test candidate32.condensation.mumps_owned
-            excitations32 = [(kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=ComplexF32(1, 0))]
-            base_solution = only(solve_condensed_coupled_excitations(baseline32, excitations32))
-            solution = only(solve_condensed_coupled_excitations(candidate32, excitations32))
-            @test eltype(solution.bem_pressure) == ComplexF32
-            for field in fields
-                @test relative(getproperty(base_solution, field), getproperty(solution, field)) < 1e-5
+            radiator_tag = physical_tag(fem_mesh, 2, "Radiator")
+            options = (quadrature_order=CONDENSED_QUADRATURE_ORDER, singular_order=CONDENSED_SINGULAR_ORDER)
+            relative(reference, candidate) = norm(ComplexF64.(candidate) .- ComplexF64.(reference)) /
+                                             max(norm(ComplexF64.(reference)), eps(Float64))
+            transducer = ElectrodynamicTransducer{Float64}(
+                "component:test", [radiator_tag], [1.0], [1], [-1.0], SVector(0.0, 0.0, 1.0),
+                2.0, 1, 6.0, 0.0005, 7.0, 0.015, 0.0005, 1.0,
+            )
+            velocity = (kind=:normal_velocity, radiator_tag=radiator_tag, transducer_index=0, amplitude=ComplexF64(0.3, -0.2))
+            voltage = (kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=ComplexF64(1, 0))
+            voltage_b = (kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=ComplexF64(-0.4, 1.3))
+            fields = (:fem_pressure, :bem_pressure, :interface_flux, :bem_neumann, :diaphragm_velocity, :voice_coil_current)
+            mumps = "BLAB_COUPLED_FEM_SOLVER" => "mumps"
+            umfpack = "BLAB_COUPLED_FEM_SOLVER" => "umfpack"
+            tc = "BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "1"
+            scenarios = (
+                (label="plain", switches=(), transducers=ElectrodynamicTransducer{Float64}[], excitations=[velocity]),
+                (label="retained transducer", switches=(), transducers=[transducer], excitations=[voltage, velocity]),
+                (label="transducer condensation", switches=(tc,), transducers=[transducer], excitations=[voltage, velocity]),
+                (label="tc + pressure elimination", switches=(tc, "BLAB_COUPLED_INTERFACE_PRESSURE_ELIMINATION" => "1"),
+                    transducers=[transducer], excitations=[voltage, velocity, voltage_b]),
+                (label="tc + flux elimination", switches=(tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1"),
+                    transducers=[transducer], excitations=[voltage, velocity, voltage_b]),
+                (label="plain + flux elimination", switches=("BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",),
+                    transducers=ElectrodynamicTransducer{Float64}[], excitations=[velocity]),
+                (label="tc + flux + dense f64 + overlap", switches=(tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
+                        "BLAB_COUPLED_DENSE_FLOAT64" => "1", "BLAB_COUPLED_STAGE_OVERLAP" => "on"),
+                    transducers=[transducer], excitations=[voltage, velocity]),
+                (label="tc + flux specialized + dense f64 + overlap", switches=(tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
+                        "BLAB_COUPLED_DENSE_FLOAT64" => "1", "BLAB_COUPLED_STAGE_OVERLAP" => "on",
+                        "BLAB_COUPLED_INTERFACE_MASS_SOLVER" => "cholmod", "BLAB_COUPLED_INTERFACE_BLOCKS" => "1",
+                        "BLAB_COUPLED_INTERFACE_MASS_OVERLAP" => "1"),
+                    transducers=[transducer], excitations=[voltage, velocity, voltage_b]),
+                (label="plain + flux blocks, mass in FEM stage", switches=("BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1",
+                        "BLAB_COUPLED_INTERFACE_BLOCKS" => "1", "BLAB_COUPLED_INTERFACE_MASS_OVERLAP" => "1"),
+                    transducers=ElectrodynamicTransducer{Float64}[], excitations=[velocity]),
+            )
+            for scenario in scenarios
+                @testset "$(scenario.label)" begin
+                    transducer_operators = assemble_transducer_operators(fem_mesh, bem_mesh, scenario.transducers)
+                    retained = sort(unique(vcat(
+                        interface_map.fem_vertex_indices,
+                        isempty(scenario.transducers) ? Int[] : findnz(transducer_operators.fem_surface)[1],
+                    )))
+                    cache_for(switches...) = withenv(switches...) do
+                        prepare_condensed_coupled_cache(fem_mesh, bem_mesh, interface_map; options..., retained_fem_vertices=retained)
+                    end
+                    umfpack_cache = cache_for(umfpack)
+                    mumps_cache = cache_for(mumps)
+                    try
+                        # Three frequencies through one cache: the first analyses, the rest refactor.
+                        for (index, frequency) in enumerate((600.0, 900.0, 350.0))
+                            build(cache, switch) = withenv(switch, scenario.switches...) do
+                                build_condensed_coupled_system(
+                                    fem_mesh, bem_mesh, interface_map, frequency, 343.0, 1.21;
+                                    options..., cache=cache, transducers=scenario.transducers,
+                                )
+                            end
+                            reference_system = index == 1 ? build_coupled_system(
+                                fem_mesh, bem_mesh, interface_map, frequency, 343.0, 1.21;
+                                options..., validation_diagnostics=false, bem_backend=:cpu,
+                                transducers=scenario.transducers,
+                            ) : nothing
+                            baseline = build(umfpack_cache, umfpack)
+                            candidate = build(mumps_cache, mumps)
+                            try
+                                @test candidate.condensation.backend == :mumps_seq
+                                @test isnothing(candidate.condensation.fem_solver_fallback_reason)
+                                @test candidate.condensation.analysis_reused == (index > 1)
+                                @test candidate.condensation.mumps_solver === mumps_cache.mumps_store[:solver]
+                                @test candidate.solved_system_order == baseline.solved_system_order
+                                @test relative(baseline.condensation.schur, candidate.condensation.schur) < 1e-10
+                                baselines = solve_condensed_coupled_excitations(baseline, scenario.excitations)
+                                candidates = solve_condensed_coupled_excitations(candidate, scenario.excitations)
+                                references = isnothing(reference_system) ? baselines :
+                                             solve_coupled_excitations(reference_system, scenario.excitations)
+                                for (reference, base_solution, solution) in zip(references, baselines, candidates)
+                                    for field in fields
+                                        getproperty(solution, field) isa AbstractArray || continue
+                                        isempty(getproperty(solution, field)) && continue
+                                        @test relative(getproperty(base_solution, field), getproperty(solution, field)) < 1e-9
+                                        @test relative(getproperty(reference, field), getproperty(solution, field)) < 1e-9
+                                    end
+                                    @test solution.fem_interior_residual < 1e-10
+                                    @test solution.fem_rhs_condensation_s >= 0 && solution.fem_reconstruction_s >= 0
+                                end
+                            finally
+                                isnothing(reference_system) || release_coupled_system!(reference_system)
+                                release_condensed_coupled_system!(baseline)
+                                release_condensed_coupled_system!(candidate)
+                            end
+                        end
+                        @test mumps_cache.mumps_store[:solver].analysis_count == 1
+                        @test mumps_cache.mumps_store[:solver].initialized
+                    finally
+                        solver = get(mumps_cache.mumps_store, :solver, nothing)
+                        release_condensed_coupled_cache!(umfpack_cache)
+                        release_condensed_coupled_cache!(mumps_cache)
+                        @test isempty(mumps_cache.mumps_store)
+                        @test !isnothing(solver) && !solver.initialized
+                    end
+                end
             end
-        finally
-            release_condensed_coupled_system!(baseline32)
-            release_condensed_coupled_system!(candidate32)
+
+            # Single-precision operators with the double-precision dense LU: MUMPS and UMFPACK factor
+            # the same promoted values, so they agree far below the Float32 operator error.
+            fem_mesh32 = load_gmsh41_volume(joinpath(CONDENSED_FIXTURE_ROOT, "femvolume.msh"), Float32(0.001))
+            bem_mesh32 = load_gmsh22_with_tags(joinpath(CONDENSED_FIXTURE_ROOT, "exterior_conforming.msh"), Float32(0.001))
+            interface_map32 = build_conforming_interface_map(
+                fem_mesh32, bem_mesh32, physical_tag(fem_mesh32, 2, "Interface"), 2,
+            )
+            transducer32 = ElectrodynamicTransducer{Float32}(
+                "component:test", [physical_tag(fem_mesh32, 2, "Radiator")], Float32[1], [1], Float32[-1],
+                SVector(0f0, 0f0, 1f0), 2f0, 1, 6f0, 0.0005f0, 7f0, 0.015f0, 0.0005f0, 1f0,
+            )
+            best = (tc, "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "1", "BLAB_COUPLED_DENSE_FLOAT64" => "1")
+            build32(switch) = withenv(switch, best...) do
+                build_condensed_coupled_system(
+                    fem_mesh32, bem_mesh32, interface_map32, 700f0, 343f0, 1.21f0;
+                    options..., transducers=[transducer32],
+                )
+            end
+            baseline32 = build32(umfpack)
+            candidate32 = build32(mumps)
+            try
+                @test candidate32.condensation.backend == :mumps_seq
+                @test candidate32.condensation.mumps_owned
+                excitations32 = [(kind=:voltage, radiator_tag=0, transducer_index=1, amplitude=ComplexF32(1, 0))]
+                base_solution = only(solve_condensed_coupled_excitations(baseline32, excitations32))
+                solution = only(solve_condensed_coupled_excitations(candidate32, excitations32))
+                @test eltype(solution.bem_pressure) == ComplexF32
+                for field in fields
+                    @test relative(getproperty(base_solution, field), getproperty(solution, field)) < 1e-5
+                end
+            finally
+                release_condensed_coupled_system!(baseline32)
+                release_condensed_coupled_system!(candidate32)
+            end
+            @test !candidate32.condensation.mumps_solver.initialized
         end
-        @test !candidate32.condensation.mumps_solver.initialized
     end
 end
