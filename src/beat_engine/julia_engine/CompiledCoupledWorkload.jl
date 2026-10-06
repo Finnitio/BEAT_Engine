@@ -146,7 +146,10 @@ function coupled_workload_environment(; mumps::Bool)
     # workload resolves the engine's own defaults (quadrature, Schur blocks, threads included).
     inherited = [name for name in keys(ENV)
                  if startswith(name, "BLAB_COUPLED_") || startswith(name, "BLAB_MUMPS_")]
-    resolved = withenv((name => nothing for name in inherited)..., (name => nothing for (name, _) in modes)...) do
+    # One pair per name: `withenv` restores duplicate keys in order, so a name cleared twice
+    # would come back cleared instead of with the caller's value.
+    cleared = unique!(vcat(inherited, [name for (name, _) in modes]))
+    resolved = withenv((name => nothing for name in cleared)...) do
         Dict(name => string(select(:metal)) for (name, select) in modes)
     end
     # One entry per name, applied in order: clear the inherited override, then the resolved

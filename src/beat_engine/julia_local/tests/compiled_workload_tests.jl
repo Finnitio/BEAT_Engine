@@ -142,8 +142,8 @@ if @isdefined(BeatEngineCompiledCpuBundle)
             @test result["excitation_port_ids"] == ["port:voltage"]
             for quantity in result["quantities"]
                 values = quantity["values"]
-                @test effective["shape"][1] == 1
-                @test effective["dtype"] == "complex64"
+                @test values["shape"][1] == 1
+                @test values["dtype"] == "complex64"
                 decoded = reinterpret(ComplexF32, bundle.base64decode(values["content_base64"]))
                 @test all(isfinite, decoded)
                 @test any(!iszero, decoded)
