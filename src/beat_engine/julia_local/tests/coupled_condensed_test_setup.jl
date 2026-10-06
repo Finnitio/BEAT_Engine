@@ -8,6 +8,25 @@ const CONDENSED_FIXTURE_ROOT = joinpath(@__DIR__, "fixtures")
 const CONDENSED_QUADRATURE_ORDER = parse(Int, get(ENV, "BLAB_COUPLED_QUADRATURE_ORDER", "1"))
 const CONDENSED_SINGULAR_ORDER = parse(Int, get(ENV, "BLAB_COUPLED_SINGULAR_ORDER", "1"))
 
+# Keep reduced-vs-unreduced comparisons independent of backend defaults. Tests inside this
+# scope opt into individual optimizations with nested `withenv` calls.
+function with_baseline_cpu_coupled(f)
+    return withenv(f,
+        "BLAB_COUPLED_TRANSDUCER_CONDENSATION" => "0",
+        "BLAB_COUPLED_INTERFACE_PRESSURE_ELIMINATION" => "0",
+        "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => "0",
+        "BLAB_COUPLED_INTERFACE_MASS_SOLVER" => "lu",
+        "BLAB_COUPLED_INTERFACE_MASS_OVERLAP" => "0",
+        "BLAB_COUPLED_INTERFACE_BLOCKS" => "0",
+        "BLAB_COUPLED_DEMAND_RECONSTRUCTION" => "0",
+        "BLAB_COUPLED_DENSE_FLOAT64" => "0",
+        "BLAB_COUPLED_DENSE_REFINEMENT" => "0",
+        "BLAB_COUPLED_FEM_FLOAT64" => "0",
+        "BLAB_COUPLED_FEM_SOLVER" => "umfpack",
+        "BLAB_COUPLED_STAGE_OVERLAP" => "off",
+    )
+end
+
 function condensed_synthetic_case(
     ::Type{T};
     vertex_count::Int=60,

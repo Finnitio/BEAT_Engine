@@ -106,12 +106,12 @@ function _schur_block_width(requested::Int, retained_count::Int)
 end
 
 """
-    _coupled_mode(name, bem_backend=:cpu; metal_default=:auto) -> :off | :on | :auto
+    _coupled_mode(name, bem_backend=:cpu; metal_default=:auto, cpu_default=:off) -> :off | :on | :auto
 
 Resolve a condensed-coupled optimization switch.
 
-- **Unset:** `metal_default` on the Metal backend, `:off` everywhere else, so CPU requests keep
-  the 0.1.4 behaviour unless a switch is set explicitly.
+- **Unset:** `metal_default` on the Metal backend, `cpu_default` on the CPU backend, `:off`
+  elsewhere (CUDA and ROCm keep their established paths unless a switch is set explicitly).
 - **`auto`:** use the optimization when the model's structure allows it; otherwise use the
   established path and record why (`coupled_optimization_fallback_reasons`).
 - **`1`/`on`/`true`/`yes`:** require it and raise when the structure does not allow it.
@@ -120,17 +120,18 @@ Resolve a condensed-coupled optimization switch.
 Anything else is an error rather than a silent default. For switches without a structural
 precondition `auto` and `on` behave the same.
 """
-function _coupled_mode(name::AbstractString, bem_backend::Symbol=:cpu; metal_default::Symbol=:auto)
+function _coupled_mode(name::AbstractString, bem_backend::Symbol=:cpu; metal_default::Symbol=:auto,
+                       cpu_default::Symbol=:off)
     value = lowercase(strip(get(ENV, name, "")))
-    isempty(value) && return bem_backend == :metal ? metal_default : :off
+    isempty(value) && return bem_backend == :metal ? metal_default : bem_backend == :cpu ? cpu_default : :off
     value in ("1", "on", "true", "yes") && return :on
     value in ("0", "off", "false", "no") && return :off
     value == "auto" && return :auto
     error("Unsupported $name value: $value. Expected 1/on, 0/off or auto.")
 end
 
-_coupled_switch(name::AbstractString, bem_backend::Symbol=:cpu; metal_default::Symbol=:auto) =
-    _coupled_mode(name, bem_backend; metal_default=metal_default) != :off
+_coupled_switch(name::AbstractString, bem_backend::Symbol=:cpu; metal_default::Symbol=:auto, cpu_default::Symbol=:off) =
+    _coupled_mode(name, bem_backend; metal_default=metal_default, cpu_default=cpu_default) != :off
 
 """
     _coupled_choice(name, bem_backend, choices, cpu_default, metal_default) -> Symbol
@@ -154,7 +155,8 @@ the surface completion factor). Both are rank one per transducer, so eliminating
 turns them into `|transducers|` extra interior solves (plus as many transpose solves) instead of
 retained Schur columns. Exact up to round-off; see `_build_condensation`.
 """
-_transducer_condensation_mode(bem_backend::Symbol=:cpu) = _coupled_mode("BLAB_COUPLED_TRANSDUCER_CONDENSATION", bem_backend)
+_transducer_condensation_mode(bem_backend::Symbol=:cpu) =
+    _coupled_mode("BLAB_COUPLED_TRANSDUCER_CONDENSATION", bem_backend; cpu_default=:auto)
 _transducer_condensation_enabled(bem_backend::Symbol=:cpu) = _transducer_condensation_mode(bem_backend) != :off
 
 """
@@ -172,7 +174,8 @@ solution by iterative refinement against the `ComplexF64` matrix (`RefinedDenseL
 stalls or does not reach the Float64 backward error within `DENSE_REFINEMENT_MAX_ITERATIONS` steps is redone with a
 `ComplexF64` LU and says why. Takes precedence over `BLAB_COUPLED_DENSE_FLOAT64` for the factorization.
 """
-_dense_refinement_enabled(bem_backend::Symbol=:cpu) = _coupled_switch("BLAB_COUPLED_DENSE_REFINEMENT", bem_backend)
+_dense_refinement_enabled(bem_backend::Symbol=:cpu) =
+    _coupled_switch("BLAB_COUPLED_DENSE_REFINEMENT", bem_backend; cpu_default=:auto)
 _dense_double_assembly(bem_backend::Symbol=:cpu) =
     _dense_float64_enabled(bem_backend) || _dense_refinement_enabled(bem_backend)
 
@@ -428,7 +431,8 @@ the interface boundary mass matrix restricted to `Γ` (geometry only, SPD for a 
 conforming interface). Then `q = M_Γ⁻¹ (S P p_B + E y - g)`, and substituting it into the BEM rows
 leaves `[p_B, y]` only. `M_Γ` is factored once per geometry; `S` is never inverted.
 """
-_interface_flux_elimination_mode(bem_backend::Symbol=:cpu) = _coupled_mode("BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION", bem_backend)
+_interface_flux_elimination_mode(bem_backend::Symbol=:cpu) =
+    _coupled_mode("BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION", bem_backend; cpu_default=:auto)
 _interface_flux_elimination_enabled(bem_backend::Symbol=:cpu) = _interface_flux_elimination_mode(bem_backend) != :off
 
 """
@@ -516,7 +520,7 @@ function _interface_mass_factorization(store, interface_operators, gamma_fem_ver
 end
 
 """
-`BLAB_COUPLED_INTERFACE_MASS_SOLVER`: `lu` or `cholmod`; unset is `cholmod` on Metal, `lu` elsewhere.
+`BLAB_COUPLED_INTERFACE_MASS_SOLVER`: `lu` or `cholmod`; unset is `cholmod` on Metal and CPU, `lu` elsewhere.
 
 Only read under `BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION`. `M_Γ` is the real P1 boundary mass
 matrix of the interface: symmetric positive definite and frequency independent. `cholmod` factors
@@ -526,7 +530,8 @@ against a random panel when built and replaced by the LU factor, with the reason
 Cholesky fails or the check does not reach `1e-10`.
 """
 _interface_mass_solver_selection(bem_backend::Symbol=:cpu) =
-    _coupled_choice("BLAB_COUPLED_INTERFACE_MASS_SOLVER", bem_backend, (:lu, :cholmod), :lu, :cholmod)
+    _coupled_choice("BLAB_COUPLED_INTERFACE_MASS_SOLVER", bem_backend, (:lu, :cholmod),
+        bem_backend == :cpu ? :cholmod : :lu, :cholmod)
 
 """
 `BLAB_COUPLED_INTERFACE_MASS_OVERLAP=1`: form `W = M_Γ⁻¹ S` and `V = M_Γ⁻¹ E` in the FEM
@@ -549,7 +554,7 @@ structurally when the operator is built and `S` at every frequency. A mass matri
 components is an error under `on` and falls back to one block under `auto`; `S` coupling two
 components of the FEM graph cannot happen and is always an error.
 """
-_interface_blocks_mode(bem_backend::Symbol=:cpu) = _coupled_mode("BLAB_COUPLED_INTERFACE_BLOCKS", bem_backend)
+_interface_blocks_mode(bem_backend::Symbol=:cpu) = _coupled_mode("BLAB_COUPLED_INTERFACE_BLOCKS", bem_backend; cpu_default=:auto)
 _interface_blocks_enabled(bem_backend::Symbol=:cpu) = _interface_blocks_mode(bem_backend) != :off
 
 """
@@ -558,7 +563,8 @@ output needs interior pressure. The caller decides (`reconstruct_interior` in
 `solve_condensed_coupled_excitations`); skipped interior pressures are `NaN` and the interior
 residual is reported as not evaluated.
 """
-_demand_reconstruction_enabled(bem_backend::Symbol=:cpu) = _coupled_switch("BLAB_COUPLED_DEMAND_RECONSTRUCTION", bem_backend)
+_demand_reconstruction_enabled(bem_backend::Symbol=:cpu) =
+    _coupled_switch("BLAB_COUPLED_DEMAND_RECONSTRUCTION", bem_backend; cpu_default=:auto)
 
 _interface_mass_specialized(bem_backend::Symbol=:cpu) =
     _interface_mass_solver_selection(bem_backend) != :lu || _interface_mass_overlap_enabled(bem_backend) ||
@@ -693,6 +699,29 @@ function _interface_mass_operator_or_single_block(
         (exception isa ErrorException && blocks_mode == :auto && !isnothing(gamma_labels)) || rethrow()
         push!(fallbacks, "interface blocks not used: " * exception.msg)
         return _interface_mass_operator(store, interface_operators, gamma_fem_vertices, gamma_dof, nothing, solver)
+    end
+end
+
+"""
+    _interface_mass_operator_or_unreduced(store, operators, gamma, gamma_dof, labels, solver, blocks_mode, required, fallbacks)
+
+`_interface_mass_operator_or_single_block`, except that a singular mass matrix returns `(nothing, false)` under flux elimination `auto`, with the
+reason pushed to `fallbacks`, so the caller solves the unreduced system. Under `on` it raises.
+"""
+function _interface_mass_operator_or_unreduced(
+    store, interface_operators, gamma_fem_vertices, gamma_dof, gamma_labels, solver::Symbol, blocks_mode::Symbol,
+    required::Bool, fallbacks::Vector{String},
+)
+    try
+        return _interface_mass_operator_or_single_block(
+            store, interface_operators, gamma_fem_vertices, gamma_dof, gamma_labels, solver, blocks_mode, fallbacks,
+        )
+    catch exception
+        # Only factorization failures: structural refusals (e.g. interface blocks `on`) still propagate.
+        (exception isa Union{LinearAlgebra.SingularException,LinearAlgebra.ZeroPivotException} && !required) ||
+            rethrow()
+        push!(fallbacks, "interface elimination not used: " * sprint(showerror, exception))
+        return nothing, false
     end
 end
 
@@ -1932,7 +1961,7 @@ function build_condensed_coupled_system(
     retained_fem_vertices = sort(
         unique(vcat(interface_map.fem_vertex_indices, transducer_fem_vertices)),
     )
-    # Optimization switches resolve against the cache's backend (unset: on for Metal, off elsewhere);
+    # Optimization switches resolve against the cache's backend (unset: on for Metal, the reductions and refined LU on CPU, off elsewhere);
     # `optimization_fallbacks` records every `auto` switch that could not be used, and why.
     bem_backend = isnothing(cache) ? :cpu : cache.base.bem_backend
     optimization_fallbacks = String[]
@@ -2098,13 +2127,17 @@ function build_condensed_coupled_system(
                      condensed_cache.interface_mass_store : nothing
         mass_started = time_ns()
         mass_solver = _interface_mass_solver_selection(bem_backend)
-        mass_operator, interface_mass_cached = _interface_mass_operator_or_single_block(
+        mass_operator, interface_mass_cached = _interface_mass_operator_or_unreduced(
             mass_store, interface_operators, gamma_fem_vertices, elimination_map.gamma_dof, gamma_labels, mass_solver,
-            blocks_mode, optimization_fallbacks,
+            blocks_mode, elimination_required, optimization_fallbacks,
         )
+        if isnothing(mass_operator)
+            interface_elimination = :none
+            elimination_map = nothing
+        end
         interface_mass_factorization_s = (time_ns() - mass_started) / 1.0e9
         elimination_split[:mass_prep] = interface_mass_factorization_s
-        mass_in_fem_stage = _interface_mass_overlap_enabled(bem_backend)
+        mass_in_fem_stage = interface_elimination == :flux && _interface_mass_overlap_enabled(bem_backend)
     end
     fem_task_s = Ref(0.0)
     fem_stage = () -> begin
