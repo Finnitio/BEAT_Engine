@@ -43,6 +43,7 @@ export VolumeMesh,
     offset_interface_map,
     assemble_interface_operators,
     assemble_transducer_operators,
+    assemble_bem_transducer_operators,
     prepare_coupled_cache,
     release_coupled_cache!,
     build_coupled_system,
@@ -898,6 +899,86 @@ function assemble_interface_operators(
     return InterfaceOperators{T}(fem_load, bem_flux, fem_trace, bem_trace)
 end
 
+"""Shared BEM motion/force discretisation for coupled and exterior transducers."""
+function assemble_bem_transducer_operators(
+    bem_mesh::BoundaryMesh{T},
+    transducers::AbstractVector{ElectrodynamicTransducer{T}},
+) where {T<:AbstractFloat}
+    transducer_count = length(transducers)
+    bem_rows = Int[]
+    bem_cols = Int[]
+    bem_values = T[]
+    bem_force_values = T[]
+    bem_velocity_rows = Int[]
+    bem_velocity_cols = Int[]
+    bem_velocity_values = T[]
+
+    for (column, transducer) in enumerate(transducers)
+        length(transducer.bem_boundary_tags) == length(transducer.bem_motion_signs) ||
+            error("Transducer $(repr(transducer.id)) BEM boundary tags and signs differ in length.")
+        axis_norm = norm(transducer.motion_axis)
+        axis_norm > zero(T) || error("Transducer $(repr(transducer.id)) has a zero motion axis.")
+        motion_axis = transducer.motion_axis / axis_norm
+        transducer.surface_completion_factor >= one(T) ||
+            error("Transducer $(repr(transducer.id)) has an invalid surface completion factor.")
+        transducer.physical_driver_orbit_count >= 1 ||
+            error("Transducer $(repr(transducer.id)) has an invalid physical driver orbit count.")
+        bem_sign_by_tag = Dict(zip(transducer.bem_boundary_tags, transducer.bem_motion_signs))
+        length(bem_sign_by_tag) == length(transducer.bem_boundary_tags) ||
+            error("Transducer $(repr(transducer.id)) repeats a BEM boundary tag.")
+        matched_bem_tags = Set{Int}()
+        for face_index in eachindex(bem_mesh.faces)
+            tag = bem_mesh.physical_tags[face_index]
+            sign = get(bem_sign_by_tag, tag, zero(T))
+            sign == zero(T) && continue
+            push!(matched_bem_tags, tag)
+            face = bem_mesh.faces[face_index]
+            projection = sign * dot(bem_mesh.normals[face_index], motion_axis)
+            nodal_area = projection * bem_mesh.areas[face_index] / T(3)
+            for vertex in face
+                push!(bem_rows, vertex)
+                push!(bem_cols, column)
+                push!(bem_values, nodal_area)
+                push!(
+                    bem_force_values,
+                    transducer.surface_completion_factor * nodal_area,
+                )
+            end
+            push!(bem_velocity_rows, face_index)
+            push!(bem_velocity_cols, column)
+            push!(bem_velocity_values, projection)
+        end
+        missing_bem_tags = setdiff(Set(keys(bem_sign_by_tag)), matched_bem_tags)
+        isempty(missing_bem_tags) || error(
+            "Transducer $(repr(transducer.id)) BEM boundary tags contain no faces: " *
+            join(sort(collect(missing_bem_tags)), ", "),
+        )
+    end
+    return (
+        bem_surface=sparse(
+            bem_rows,
+            bem_cols,
+            bem_values,
+            length(bem_mesh.vertices),
+            transducer_count,
+        ),
+        bem_force=sparse(
+            bem_rows,
+            bem_cols,
+            bem_force_values,
+            length(bem_mesh.vertices),
+            transducer_count,
+        ),
+        bem_normal_velocity=sparse(
+            bem_velocity_rows,
+            bem_velocity_cols,
+            bem_velocity_values,
+            length(bem_mesh.faces),
+            transducer_count,
+        ),
+    )
+end
+
 function assemble_transducer_operators(
     fem_mesh::VolumeMesh{T},
     bem_mesh::BoundaryMesh{T},
@@ -916,14 +997,6 @@ function assemble_transducer_operators(
     fem_cols = Int[]
     fem_values = T[]
     fem_force_values = T[]
-    bem_rows = Int[]
-    bem_cols = Int[]
-    bem_values = T[]
-    bem_force_values = T[]
-    bem_velocity_rows = Int[]
-    bem_velocity_cols = Int[]
-    bem_velocity_values = T[]
-
     fem_outward_normals = _outward_boundary_normals(fem_mesh)
     for (column, transducer) in enumerate(transducers)
         length(transducer.fem_boundary_tags) == length(transducer.fem_motion_signs) ||
@@ -967,37 +1040,6 @@ function assemble_transducer_operators(
             "Transducer $(repr(transducer.id)) FEM boundary tags contain no selected faces: " *
             join(sort(collect(missing_fem_tags)), ", "),
         )
-
-        bem_sign_by_tag = Dict(zip(transducer.bem_boundary_tags, transducer.bem_motion_signs))
-        length(bem_sign_by_tag) == length(transducer.bem_boundary_tags) ||
-            error("Transducer $(repr(transducer.id)) repeats a BEM boundary tag.")
-        matched_bem_tags = Set{Int}()
-        for face_index in eachindex(bem_mesh.faces)
-            tag = bem_mesh.physical_tags[face_index]
-            sign = get(bem_sign_by_tag, tag, zero(T))
-            sign == zero(T) && continue
-            push!(matched_bem_tags, tag)
-            face = bem_mesh.faces[face_index]
-            projection = sign * dot(bem_mesh.normals[face_index], motion_axis)
-            nodal_area = projection * bem_mesh.areas[face_index] / T(3)
-            for vertex in face
-                push!(bem_rows, vertex)
-                push!(bem_cols, column)
-                push!(bem_values, nodal_area)
-                push!(
-                    bem_force_values,
-                    transducer.surface_completion_factor * nodal_area,
-                )
-            end
-            push!(bem_velocity_rows, face_index)
-            push!(bem_velocity_cols, column)
-            push!(bem_velocity_values, projection)
-        end
-        missing_bem_tags = setdiff(Set(keys(bem_sign_by_tag)), matched_bem_tags)
-        isempty(missing_bem_tags) || error(
-            "Transducer $(repr(transducer.id)) BEM boundary tags contain no faces: " *
-            join(sort(collect(missing_bem_tags)), ", "),
-        )
     end
 
     return (
@@ -1015,27 +1057,7 @@ function assemble_transducer_operators(
             length(fem_mesh.vertices),
             transducer_count,
         ),
-        bem_surface=sparse(
-            bem_rows,
-            bem_cols,
-            bem_values,
-            length(bem_mesh.vertices),
-            transducer_count,
-        ),
-        bem_force=sparse(
-            bem_rows,
-            bem_cols,
-            bem_force_values,
-            length(bem_mesh.vertices),
-            transducer_count,
-        ),
-        bem_normal_velocity=sparse(
-            bem_velocity_rows,
-            bem_velocity_cols,
-            bem_velocity_values,
-            length(bem_mesh.faces),
-            transducer_count,
-        ),
+        assemble_bem_transducer_operators(bem_mesh, transducers)...,
     )
 end
 

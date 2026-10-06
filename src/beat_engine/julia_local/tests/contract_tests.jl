@@ -83,7 +83,8 @@ end
     info = worker_ready(Dict("cpu" => Dict("available" => true, "reason" => "")))
     @test info["protocol"]["version"] == 1
     @test info["contracts"]["system_request"] == [1]
-    @test info["contracts"]["compiled_system"] == [1, 2]
+    @test info["contracts"]["compiled_system"] == [1, 2, 3]
+    @test info["exterior_component_kinds"] == ["ideal_velocity_source", "electrodynamic_transducer"]
     @test info["contracts"]["system_result"] == [2]
     @test "radiation_impedance_matrix" in info["optional_output_quantities"]
     @test info["runtime"]["julia_version"] == string(VERSION)

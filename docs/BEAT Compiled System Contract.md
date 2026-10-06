@@ -224,20 +224,21 @@ operators. Unsupported modes/backends fail before frequency assembly. See
 [Metal Backend](Metal%20Backend.md), and `coupled_bem_assembly` resolves to
 `operators`.
 
-## Exterior ideal-source radiation impedance matrix
+## Exterior radiation impedance matrix
 
 Workers may advertise the additive `radiation_impedance_matrix` optional output
 quantity. Clients must negotiate this capability before submission; compiled
 system versions 1 and 2 and result version 2 are unchanged. This output requires
-an exterior-only system containing only `ideal_velocity_source` components.
-Exterior `electrodynamic_transducer` requests fail explicitly, including undriven
-transducers. `passive_radiator` is not implemented and fails in every solve kind.
+an exterior-only system with supported component kinds: `ideal_velocity_source`
+and, under compiled contract v3, `electrodynamic_transducer`.
+`passive_radiator` is not implemented and fails in every solve kind.
 Both server validation and the independent Python contract enforce these rules.
 
 Request `{"id":"zrad","quantity":"radiation_impedance_matrix","target_ids":[],"options":{}}`.
-Empty targets select every excited ideal component in compiled `components`
-order. Explicit targets select the same ordered subset for both rows and columns;
-unknown, duplicate or unexcited targets fail. Unexcited ideal boundaries stay
+Empty targets select all transducers and requested ideal components in compiled
+`components` order. Explicit targets select the same ordered subset for both rows
+and columns; unknown, duplicate or unrequested ideal targets fail. Undriven
+transducers are valid targets. Unexcited ideal boundaries stay
 rigid. Multiple ports on one component share its unit-velocity basis. Solve
 requests require at least one excitation port.
 
@@ -247,8 +248,8 @@ unit component velocity, the definition is
 
 `Z_ij = c_i * sum_f w_i(f) * A_f * (p_j[v1]+p_j[v2]+p_j[v3])/3`.
 
-Here `p_j` is the returned multi-RHS boundary pressure for component j, including
-all symmetry images. `w_i` is its boundary motion weight for `uniform_normal`, or
+Here `p_j` is the unit-motion BEM basis pressure for component j, including
+all symmetry images, before solving the electrical/mechanical network. `w_i` is its boundary motion weight for `uniform_normal`, or
 that weight times `normal dot motion_axis` for `rigid_translation`. The projection
 has one sign. `c_i = physical_radiator_count`: 1 for off and rigid ground, 2 for x,
 and 4 for xy. A single y-plane reflection would also imply count 2, but y-only
@@ -263,8 +264,10 @@ not recover accuracy lost in Float32 geometry, source parameters or BEM.
 Metadata supplies `component_ids`, `kinds`, `row_weights`, `definition` and
 `phasor_convention`. The definition is
 `force_per_unit_velocity; per-row physical-copy weighting in row_weights`. Every ideal
-row has `W_ii = 1`. Future transducer rows will instead integrate force per copy
-using completion factors and use physical orbit counts as row weights. The
+row has `W_ii = 1`. Transducer rows integrate force per physical copy using
+`surface_completion_factor`, and their `W_ii` is `physical_driver_orbit_count`.
+Orbit never multiplies a transducer's mechanical feedback row. Metadata also
+supplies `surface_completion_factors` and `physical_driver_orbit_counts`. The
 matrix is neither symmetrized nor made passive. Its metadata diagnostics are
 `reciprocity_max_rel = max(abs(W*Z - transpose(W*Z)))/max(abs(W*Z))` (zero for a
 zero matrix), and `passivity_min_eig`, the minimum eigenvalue of
@@ -273,11 +276,13 @@ or passivity errors. Both `exp(+i omega t)` and `exp(-i omega t)` are supported;
 real-velocity responses conjugate between these conventions.
 
 The existing `radiation_impedance` retains its original shape, units, `radiator`
-axis and compiled component ordering. It requires **every compiled component to
-be excited** and refuses otherwise with a clear error; it never shrinks that
-axis. Use the matrix output when only an excited subset is wanted. Transducer
-networks, passive radiators and bounded/coupled matrix outputs are not supported
-by this addition.
+axis and compiled ideal-component ordering. It requires **every ideal component
+to be excited** and refuses otherwise with a clear error; it never shrinks the
+ideal radiator axis. Transducers do not appear on this axis. Its values remain
+unit-motion self loads, before network superposition. Thus ideal-only v1/v2
+requests retain their original ordering and bytes. Use the matrix output when
+only an excited subset is wanted. Passive radiators and bounded/coupled matrix
+outputs are unsupported.
 
 The opt-in compatibility harness `scripts/compare_exterior_legacy.jl` loads the
 driver and original force-integration helper from Git revision
@@ -302,3 +307,116 @@ From the repository root, run through the compute broker with `BROKER` and
   --shell "'$JULIA' --threads=2 --startup-file=no --project=src/beat_engine/julia_local scripts/compare_exterior_legacy.jl"
 "$BROKER" wait <job-id> --timeout 540
 ```
+
+
+## Exterior electrodynamic transducers (compiled contract v3)
+
+An exterior system (no `bounded_air` region) containing any
+`electrodynamic_transducer` **requires** `compiled_system.contract_version: 3`,
+even when none of its voltage ports is requested. Versions 1 and 2 refuse such
+systems. Version 3 is also accepted for ideal-only and bounded/coupled systems;
+it is not required there and does not opt them into changed physics. This is an
+additive version extension: announcements contain `compiled_system: [1,2,3]`,
+while the request envelope stays v1 and results stay v2. Source-profile version
+guards accept v2 and v3. Existing readiness probes can check containment of
+supported versions and ignore additional capabilities.
+
+Workers advertise `exterior_component_kinds` as
+`["ideal_velocity_source","electrodynamic_transducer"]`. Exterior submission
+negotiation checks **every** compiled component, including undriven components,
+against that list. A missing list means `["ideal_velocity_source"]`; merely
+advertising v3 is insufficient. The independent Julia server also validates the
+v3 rule, precision and limits before solving. The schema enum extends to
+`[1,2,3]` without changing other schema fields. `passive_radiator` remains refused
+and unadvertised.
+
+Transducers use the coupled path's LEM parameter names, rigid-translation axis,
+boundary signs/weights, optional semi-inductance and optional sealed rear chamber.
+Only BEM tags in the active exterior region may be attached. BEM precision must
+be explicitly `float64` (the exterior default is still float32, which is refused
+here). Geometry, motion/force operators, LEM parameters and the small dense
+complex network all use Float64. `solver_options.transducer_reference_voltage_v`
+defines voltage-port amplitude (default 2.83 V, finite and positive). This is the
+phasor voltage directly: the worker does not insert a square-root-of-two factor.
+
+The motion basis contains all transducers in compiled order, followed by the
+requested ideal sources, once per component. Ideal ports prescribe 1 m/s;
+transducer ports prescribe reference voltage. Multiple ports on the same driver
+produce equal columns. Unrequested ideal boundaries stay rigid. Every undriven
+transducer has V=0 through its electrical impedance: **shorted only**, with no
+open-circuit termination option.
+
+For each frequency the existing multi-RHS BEM solves unit-motion pressure P and
+Neumann Q. The shared coupled BEM helper assembles signed projection
+`b = sign * weight * (normal dot normalized_axis)`, and nodal force coefficient
+`completion * b * area / 3`, with exactly one motion sign. With Z = FᵀP, the
+mechanical/electrical rows are
+
+```text
+(diag(Zm) + Z_DD) u_D - diag(Bl) i = -Z_DS u_S
+                  diag(Bl) u_D + diag(Ze) i = V
+```
+
+Zm and Ze use the coupled engine's unchanged impedance/phasor helpers. Boundary
+and field outputs are then computed from P·U and Q·U in requested-port order.
+Both `exp(+i omega t)` and `exp(-i omega t)` are supported. This changes exterior
+transducer physics only; ideal-only requests keep their existing solver path.
+
+`diaphragm_velocity` and `voice_coil_current` are strictly opt-in on exterior
+solves. Each requested output has shape `[excitation,transducer]`, axes
+`["excitation","transducer"]`, units `m/s` and `A` respectively, and the coupled
+metadata: `component_ids`, `surface_completion_factors`, and
+`physical_driver_orbit_counts`, in compiled transducer order. Undriven transducers
+are included. Excursion `u / time_derivative(omega)` and input impedance `V/i`
+remain client calculations. The matrix output is independent of port amplitude;
+its transducer rows are per-copy loads, while ideal rows retain total-copy loads.
+
+### Signed effective volume area and acoustic conversion
+
+`radiation_impedance_matrix.metadata.effective_volume_area_m2` supplies S_j, the
+signed integral of motion factor b_j over physical moving surfaces, in matrix
+component order. Real symmetry copies are included; ground images are excluded.
+Transducer values use exactly the assembled force coefficients times orbit;
+ideal values use the same geometry and precision as their force integration.
+The metadata includes `effective_volume_area_definition`,
+`effective_volume_area_zero_or_near_cancelling` (one boolean per component), and
+`effective_volume_area_cancellation_relative_tolerance: 1e-8`. A component is
+flagged when `abs(S) <= 1e-8 * integral(abs(b))`, including the zero-area case.
+Closed translating spheres/dipoles have cancelling signed area; the flag is
+expected and does not invalidate their mechanical impedance or pressure output.
+
+There is no second acoustic matrix. For non-cancelling S, let
+`D_S = diag(effective_volume_area_m2)` and `W = diag(row_weights)`. Clients may
+convert the mechanical matrix Z_m to acoustic units with
+`Z_a = D_S⁻¹ (W Z_m) D_S⁻¹` (`Pa*s/m³`). Clients must refuse this conversion for
+flagged components: a dipole's local velocity cannot be represented by a single
+nonzero volume flow. No absolute-value substitution for S is valid.
+
+### Current physical limits and compatibility gates
+
+Exterior transducers support **off and rigid ground** symmetry in this slice.
+Ground has completion=orbit=1 and contributes an image only to the Green function.
+`x` and `xy` transducer symmetry are explicitly refused and deferred to the next
+slice; the existing coupled completion×orbit rule alone does not qualify them.
+Ideal-only x/xy support is retained.
+
+The exterior BEM mesh must consist of closed, consistently outward-wound solids.
+The worker checks two oppositely oriented incidences per edge and positive signed
+volume per connected shell. Open or two-sided thin diaphragms are unsupported.
+An open-back driver needs closed reconstructed front/rear moving surfaces and
+surrounding rigid surfaces to model rear radiation. A front-only cone omits rear
+loading. The optional sealed chamber supplies lumped stiffness only.
+Compression drivers are not modelled by putting a transducer on a throat: there
+is no compression chamber, area transformer or phase plug model. Use an ideal
+throat source until those loads are modelled.
+
+The standalone gates `tests/exterior_transducer_tests.jl` and
+`tests/exterior_impedance_matrix_tests.jl` cover analytical dipole response, both
+phasors, dense monolithic elimination, shorted undriven response, mixed ports,
+area metadata, opt-in outputs and refusals. `scripts/compare_exterior_legacy.jl`
+retains the ideal-only byte gate. `scripts/compare_coupled_transducer_operators.jl`
+loads the pre-split coupled source at `10cba4fc`, compares every sparse operator's
+structure and value bytes on packaged coupled fixtures in both precisions, and
+compares all requested coupled result quantity bytes in both conventions.
+No frozen baseline is rewritten. CPU qualification does not qualify accelerator
+backends or make performance claims.

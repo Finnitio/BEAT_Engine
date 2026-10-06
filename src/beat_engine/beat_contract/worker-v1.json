@@ -14,7 +14,8 @@
     ],
     "compiled_system": [
       1,
-      2
+      2,
+      3
     ],
     "system_result": [
       2
@@ -65,5 +66,9 @@
   "request_transports": [
     "file",
     "inline_json"
+  ],
+  "exterior_component_kinds": [
+    "ideal_velocity_source",
+    "electrodynamic_transducer"
   ]
 }

@@ -260,7 +260,7 @@
             "compiled_system",
             "contract_version"
           ],
-          "value": 3
+          "value": 4
         }
       ]
     },
@@ -1844,7 +1844,7 @@
           "value": "electrodynamic_transducer"
         }
       ],
-      "expected_message": "exterior electrodynamic_transducer is not implemented"
+      "expected_message": "exterior electrodynamic_transducer requires compiled-system contract version 3"
     },
     {
       "name": "exterior_transducer_refused_v2_unrequested",
@@ -1884,7 +1884,7 @@
           ]
         }
       ],
-      "expected_message": "exterior electrodynamic_transducer is not implemented"
+      "expected_message": "exterior electrodynamic_transducer requires compiled-system contract version 3"
     },
     {
       "name": "passive_radiator_not_implemented",
@@ -1977,7 +1977,528 @@
           ]
         }
       ],
-      "expected_message": "radiation_impedance_matrix requires an exterior ideal-source-only system"
+      "expected_message": "radiation_impedance_matrix requires an exterior system with supported component kinds"
+    },
+    {
+      "name": "v3_ideal_additive",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        }
+      ]
+    },
+    {
+      "name": "v3_exterior_transducer",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        }
+      ]
+    },
+    {
+      "name": "v3_exterior_float32",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float32"
+        }
+      ],
+      "expected_message": "require float64 BEM precision"
+    },
+    {
+      "name": "v3_exterior_default_precision",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "remove": true
+        }
+      ],
+      "expected_message": "require float64 BEM precision"
+    },
+    {
+      "name": "v3_exterior_x_deferred",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "symmetry"
+          ],
+          "value": "x"
+        }
+      ],
+      "expected_message": "support only off and ground symmetry"
+    },
+    {
+      "name": "v3_passive_refused",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "passive_radiator"
+        }
+      ],
+      "expected_message": "passive_radiator is not implemented"
+    },
+    {
+      "name": "v3_exterior_opt_in_motion_outputs",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "diaphragm_velocity",
+              "quantity": "diaphragm_velocity",
+              "target_ids": [],
+              "options": {}
+            },
+            {
+              "id": "voice_coil_current",
+              "quantity": "voice_coil_current",
+              "target_ids": [],
+              "options": {}
+            },
+            {
+              "id": "radiation_impedance_matrix",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [],
+              "options": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "v3_undriven_matrix_target",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components"
+          ],
+          "value": [
+            {
+              "id": "component:source",
+              "name": "Source",
+              "kind": "ideal_velocity_source",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {}
+            },
+            {
+              "id": "undriven",
+              "name": "Source",
+              "kind": "electrodynamic_transducer",
+              "boundary_ids": [
+                "boundary:source"
+              ],
+              "parameters": {
+                "re_ohm": 6.0,
+                "le_h": 0.0005,
+                "bl_n_per_a": 7.0,
+                "mmd_kg": 0.015,
+                "cms_m_per_n": 0.0005,
+                "rms_n_s_per_m": 1.0,
+                "motion_axis": [
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "path": [
+            "outputs"
+          ],
+          "value": [
+            {
+              "id": "z",
+              "quantity": "radiation_impedance_matrix",
+              "target_ids": [
+                "undriven"
+              ],
+              "options": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "v3_bounded_additive",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        }
+      ]
     }
   ]
 }

@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-COMPILED_SYSTEM_VERSION = 2
+COMPILED_SYSTEM_VERSION = 3
 SYSTEM_SOLVE_REQUEST_VERSION = 1
 SYSTEM_RESULT_VERSION = 2
 SUPPORTED_SYSTEM_RESULT_VERSIONS = frozenset({1, SYSTEM_RESULT_VERSION})
@@ -137,8 +137,8 @@ def _component_support(system: dict) -> None:
         path = f"compiled_system.components.{component['id']}"
         if component["kind"] == "passive_radiator":
             _fail(path, "passive_radiator is not implemented")
-        if exterior and component["kind"] == "electrodynamic_transducer":
-            _fail(path, "exterior electrodynamic_transducer is not implemented")
+        if exterior and component["kind"] == "electrodynamic_transducer" and system["contract_version"] != 3:
+            _fail(path, "exterior electrodynamic_transducer requires compiled-system contract version 3")
 
 
 def _impedance_outputs(request: dict) -> None:
@@ -147,20 +147,45 @@ def _impedance_outputs(request: dict) -> None:
         port["component_id"] for port in system["excitation_ports"] if port["id"] in request["excitation_port_ids"]
     }
     components = {component["id"]: component for component in system["components"]}
+    exterior_transducers = not any(region["kind"] == "bounded_air" for region in system["regions"]) and any(
+        component["kind"] == "electrodynamic_transducer" for component in components.values()
+    )
+    if exterior_transducers:
+        options = request["solver_options"]
+        if str(options.get("precision", "float32")).lower() != "float64":
+            _fail(
+                "request.solver_options.precision", "exterior electrodynamic_transducers require float64 BEM precision"
+            )
+        if str(options.get("symmetry", "off")).lower() not in ("off", "ground"):
+            _fail(
+                "request.solver_options.symmetry",
+                "exterior electrodynamic_transducers support only off and ground symmetry",
+            )
     for output in request["outputs"]:
         if output["quantity"] == "radiation_impedance_matrix":
             if any(region["kind"] == "bounded_air" for region in system["regions"]) or any(
-                component["kind"] != "ideal_velocity_source" for component in components.values()
+                component["kind"] not in ("ideal_velocity_source", "electrodynamic_transducer")
+                for component in components.values()
             ):
-                _fail("request.outputs", "radiation_impedance_matrix requires an exterior ideal-source-only system")
+                _fail(
+                    "request.outputs",
+                    "radiation_impedance_matrix requires an exterior system with supported component kinds",
+                )
             targets = output["target_ids"]
             _references(targets, components, "request.outputs.target_ids")
-            if any(target not in excited for target in targets):
+            if any(
+                target not in excited and components[target]["kind"] != "electrodynamic_transducer"
+                for target in targets
+            ):
                 _fail("request.outputs.target_ids", "radiation_impedance_matrix targets must be excited")
         elif output["quantity"] == "radiation_impedance" and not any(
             region["kind"] == "bounded_air" for region in system["regions"]
         ):
-            if any(component_id not in excited for component_id in components):
+            if any(
+                component_id not in excited
+                for component_id, component in components.items()
+                if component["kind"] == "ideal_velocity_source"
+            ):
                 _fail(
                     "request.outputs",
                     "radiation_impedance requires every compiled component to be excited; radiator axis remains compiled component order",

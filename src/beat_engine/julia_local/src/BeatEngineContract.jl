@@ -139,8 +139,8 @@ function component_support(system)
     for component in system["components"]
         path = "compiled_system.components.$(component["id"])"
         component["kind"] == "passive_radiator" && fail(path, "passive_radiator is not implemented")
-        exterior && component["kind"] == "electrodynamic_transducer" &&
-            fail(path, "exterior electrodynamic_transducer is not implemented")
+        exterior && component["kind"] == "electrodynamic_transducer" && system["contract_version"] != 3 &&
+            fail(path, "exterior electrodynamic_transducer requires compiled-system contract version 3")
     end
     return nothing
 end
@@ -151,17 +151,24 @@ function impedance_outputs(request)
         if port["id"] in request["excitation_port_ids"])
     components = Dict(component["id"] => component for component in system["components"])
     exterior = !any(region["kind"] == "bounded_air" for region in system["regions"])
+    if exterior && any(component["kind"] == "electrodynamic_transducer" for component in values(components))
+        options = request["solver_options"]
+        lowercase(String(get(options, "precision", "float32"))) == "float64" ||
+            fail("request.solver_options.precision", "exterior electrodynamic_transducers require float64 BEM precision")
+        lowercase(String(get(options, "symmetry", "off"))) in ("off", "ground") ||
+            fail("request.solver_options.symmetry", "exterior electrodynamic_transducers support only off and ground symmetry")
+    end
     for output in request["outputs"]
         quantity = output["quantity"]
         if quantity == "radiation_impedance_matrix"
-            exterior && all(component["kind"] == "ideal_velocity_source" for component in values(components)) ||
-                fail("request.outputs", "radiation_impedance_matrix requires an exterior ideal-source-only system")
+            exterior && all(component["kind"] in ("ideal_velocity_source", "electrodynamic_transducer") for component in values(components)) ||
+                fail("request.outputs", "radiation_impedance_matrix requires an exterior system with supported component kinds")
             targets = output["target_ids"]
             references(targets, components, "request.outputs.target_ids")
-            all(target in excited for target in targets) ||
+            all(target in excited || components[target]["kind"] == "electrodynamic_transducer" for target in targets) ||
                 fail("request.outputs.target_ids", "radiation_impedance_matrix targets must be excited")
         elseif quantity == "radiation_impedance" && exterior
-            all(id in excited for id in keys(components)) || fail("request.outputs",
+            all(id in excited for (id, component) in components if component["kind"] == "ideal_velocity_source") || fail("request.outputs",
                 "radiation_impedance requires every compiled component to be excited; radiator axis remains compiled component order")
         end
     end

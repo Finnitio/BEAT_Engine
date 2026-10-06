@@ -952,6 +952,8 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
     precision_name = lowercase(String(get(options, "precision", "float32")))
     FloatType = precision_name == "float64" ? Float64 : precision_name == "float32" ? Float32 :
                 error("Exterior precision must be float32 or float64.")
+    has_transducers = any(component["kind"] == "electrodynamic_transducer" for component in components)
+    has_transducers && FloatType !== Float64 && error("Exterior electrodynamic_transducers require float64 BEM precision.")
     backend = Symbol(lowercase(String(get(options, "bem_backend", "cpu"))))
     backend in (:cpu, :cuda, :rocm, :metal) || error("Exterior BEM backend must be cpu, cuda, rocm, or metal.")
     requested_assembly = lowercase(String(get(options, "burton_miller_assembly", "direct_system")))
@@ -988,7 +990,10 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
         min_clearance_m=Float64(get(options, "ground_plane_min_clearance_m", 0.0)),
     )
     excitation_port_ids = String.(request["excitation_port_ids"])
-    excitations = exterior_excitations(
+    lumped = has_transducers ? exterior_motion_basis(
+        system, excitation_port_ids, boundaries, bem_domain, mesh, unbounded_region, symmetry_mode,
+    ) : nothing
+    excitations = has_transducers ? lumped.basis : exterior_excitations(
         excitation_port_ids,
         (ports=port_objects, items=components),
         boundaries,
@@ -1109,7 +1114,8 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
     produce_metal_system = function (index)
         omega = FloatType(2pi) * FloatType(frequencies_hz[index])
         wavenumber = omega / sound_speed
-        neumann_values = [exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
+        neumann_values = [has_transducers ? exterior_basis_neumann(mesh, excitation, density, omega, lumped.operators) :
+            exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
         system, assembly_s = assemble_exterior_direct_metal(
             mesh, p1_space, dp0_space, neumann_values, wavenumber, base_rule; metal_fused_kwargs...,
         )
@@ -1176,7 +1182,8 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                     symmetry_mode=symmetry_mode,
                 )
             end : nothing
-            neumann_values = [exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
+            neumann_values = [has_transducers ? exterior_basis_neumann(mesh, excitation, density, omega, lumped.operators) :
+                exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
             operators = nothing
             metal_solve_method = :lu
             exterior_rhs = nothing
@@ -1271,6 +1278,21 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                 end
                 solve_s = (time_ns() - solve_started) / 1.0e9
             end
+            basis_pressures = pressures
+            network_solution = nothing
+            if has_transducers
+                network_started = time_ns()
+                p = hcat(basis_pressures...)
+                q = hcat(neumann_values...)
+                z = transpose(lumped.force) * p
+                network_solution = solve_exterior_lumped_network(
+                    z, lumped.transducers, excitations, port_objects, excitation_port_ids, omega, density, sound_speed,
+                    Float64(get(options, "transducer_reference_voltage_v", DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V)),
+                )
+                pressures = collect(eachcol(p * network_solution.velocity))
+                neumann_values = collect(eachcol(q * network_solution.velocity))
+                solve_s += (time_ns() - network_started) / 1.0e9
+            end
             quantities = Dict{String,Any}[]
             field_s = 0.0
             for output in outputs
@@ -1324,20 +1346,28 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                     )
                 elseif quantity == "radiation_impedance_matrix"
                     matrix, metadata = exterior_impedance_matrix(
-                        mesh, pressures, excitations, components, output["target_ids"], symmetry_mode,
+                        mesh, basis_pressures, excitations, components, output["target_ids"], symmetry_mode;
+                        force_matrix=has_transducers ? lumped.force : nothing,
                     )
                     push!(quantities, quantity_wire(output, matrix, "N*s/m",
                         ["receiver_component", "source_component"]; metadata=metadata))
+                elseif quantity in ("diaphragm_velocity", "voice_coil_current") && has_transducers
+                    values = quantity == "diaphragm_velocity" ?
+                        network_solution.velocity[1:length(lumped.transducers), :] : network_solution.current
+                    push!(quantities, quantity_wire(output, Matrix(transpose(values)),
+                        quantity == "diaphragm_velocity" ? "m/s" : "A", ["excitation", "transducer"];
+                        metadata=exterior_transducer_metadata(lumped.transducers)))
                 elseif quantity == "radiation_impedance"
                     impedance_by_component = Complex{FloatType}[]
                     pressure_by_component = Dict(
                         excitation.component_id => pressure
-                        for (excitation, pressure) in zip(excitations, pressures)
+                        for (excitation, pressure) in zip(excitations, basis_pressures)
                     )
                     excitation_by_component = Dict(
                         excitation.component_id => excitation for excitation in excitations
                     )
                     for component in components
+                        component["kind"] == "ideal_velocity_source" || continue
                         component_id = String(component["id"])
                         push!(
                             impedance_by_component,
@@ -1398,6 +1428,13 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                     "cache_setup_s" => 0.0,
                 ),
             )
+            if has_transducers
+                diagnostics["exterior_lumped_network"] = Dict(
+                    "termination" => "shorted", "precision" => "float64",
+                    "motion_basis_component_ids" => [e.component_id for e in excitations],
+                    "residual_max_abs" => network_solution.residual_max_abs,
+                )
+            end
             if exterior_rhs !== nothing
                 diagnostics["exterior_rhs_requested_mode"] = exterior_rhs_requested_mode
                 diagnostics["exterior_rhs_mode"] = exterior_rhs.mode

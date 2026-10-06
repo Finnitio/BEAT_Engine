@@ -50,6 +50,12 @@ def validate_worker_ready(info: dict) -> None:
             isinstance(values, list) and all(isinstance(value, str) and value for value in values),
             f"invalid {name} capabilities.",
         )
+    if "exterior_component_kinds" in info:
+        kinds = info["exterior_component_kinds"]
+        _require(
+            isinstance(kinds, list) and all(isinstance(kind, str) and bool(kind.strip()) for kind in kinds),
+            "invalid exterior_component_kinds capabilities; expected a list of non-empty strings.",
+        )
     if "exterior_source_profiles" in info:
         profiles = info["exterior_source_profiles"]
         _require(
@@ -116,6 +122,11 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
         )
         _require(kind in info["solve_kinds"], f"solve kind {kind!r} is unavailable.")
         for component in request["compiled_system"]["components"]:
+            if kind == "exterior_bem":
+                _require(
+                    component["kind"] in info.get("exterior_component_kinds", ["ideal_velocity_source"]),
+                    f"exterior component kind {component['kind']!r} is unavailable; update the engine worker.",
+                )
             if component["kind"] != "ideal_velocity_source":
                 continue
             profile = component["parameters"].get("motion_profile", "uniform_normal")

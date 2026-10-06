@@ -289,3 +289,51 @@ def test_rejects_malformed_optional_output_announcements(ready, capabilities):
     ready["optional_output_quantities"] = capabilities
     with pytest.raises(WorkerCompatibilityError, match="optional_output_quantities"):
         validate_worker_ready(ready)
+
+
+def exterior_transducer_payload(payload):
+    payload["compiled_system"]["contract_version"] = 3
+    payload["compiled_system"]["components"][0]["kind"] = "electrodynamic_transducer"
+    payload["compiled_system"]["excitation_ports"][0]["kind"] = "voltage"
+    payload["solver_options"]["precision"] = "float64"
+    return payload
+
+
+def test_exterior_transducers_require_kind_capability_even_with_v3(ready, payload):
+    exterior_transducer_payload(payload)
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+    for kinds in (None, ["ideal_velocity_source"], []):
+        old = copy.deepcopy(ready)
+        if kinds is None:
+            old.pop("exterior_component_kinds")
+        else:
+            old["exterior_component_kinds"] = kinds
+        with pytest.raises(WorkerCompatibilityError, match="electrodynamic_transducer"):
+            negotiate_submission(old, payload, "solve")
+    old = copy.deepcopy(ready)
+    old["contracts"]["compiled_system"] = [1, 2]
+    with pytest.raises(WorkerCompatibilityError, match="compiled_system version 3"):
+        negotiate_submission(old, payload, "solve")
+
+
+def test_undriven_exterior_transducer_also_requires_capability(ready, payload):
+    driver = copy.deepcopy(payload["compiled_system"]["components"][0])
+    driver.update(id="undriven", kind="electrodynamic_transducer")
+    payload["compiled_system"]["components"].append(driver)
+    payload["compiled_system"]["contract_version"] = 3
+    payload["solver_options"]["precision"] = "float64"
+    ready.pop("exterior_component_kinds")
+    with pytest.raises(WorkerCompatibilityError, match="electrodynamic_transducer"):
+        negotiate_submission(ready, payload, "solve")
+
+
+@pytest.mark.parametrize("kinds", [None, {}, "ideal_velocity_source", [1], [""], [" "]])
+def test_invalid_exterior_kind_advertisement(ready, kinds):
+    ready["exterior_component_kinds"] = kinds
+    with pytest.raises(WorkerCompatibilityError, match="exterior_component_kinds"):
+        validate_worker_ready(ready)
+
+
+def test_missing_exterior_kinds_keeps_ideal_sources_compatible(ready, payload):
+    ready.pop("exterior_component_kinds")
+    assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2

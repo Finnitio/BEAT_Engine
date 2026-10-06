@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from beat_engine.beat_contract import validate_compiled_system, validate_solve_request
+from beat_engine.beat_contract import COMPILED_SYSTEM_VERSION, validate_compiled_system, validate_solve_request
 
 CONTRACT = Path(__file__).resolve().parents[1] / "src/beat_engine/beat_contract"
 CORPUS = json.loads((CONTRACT / "conformance.json").read_text())
@@ -151,5 +151,9 @@ def test_matrix_refused_for_bounded_request():
     request = copy.deepcopy(CORPUS["base_request"])
     request["compiled_system"]["regions"][0]["kind"] = "bounded_air"
     request["outputs"] = [{"id": "z", "quantity": "radiation_impedance_matrix", "target_ids": [], "options": {}}]
-    with pytest.raises(ValueError, match="exterior ideal-source-only"):
+    with pytest.raises(ValueError, match="requires an exterior system"):
         validate_solve_request(request)
+
+
+def test_current_compiled_contract_version():
+    assert COMPILED_SYSTEM_VERSION == 3
