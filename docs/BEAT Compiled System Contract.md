@@ -249,11 +249,14 @@ unit component velocity, the definition is
 `Z_ij = c_i * sum_f w_i(f) * A_f * (p_j[v1]+p_j[v2]+p_j[v3])/3`.
 
 Here `p_j` is the unit-motion BEM basis pressure for component j, including
-all symmetry images, before solving the electrical/mechanical network. `w_i` is its boundary motion weight for `uniform_normal`, or
-that weight times `normal dot motion_axis` for `rigid_translation`. The projection
-has one sign. `c_i = physical_radiator_count`: 1 for off and rigid ground, 2 for x,
-and 4 for xy. A single y-plane reflection would also imply count 2, but y-only
-symmetry is not a supported solve mode; y reflections currently enter through xy.
+all symmetry images, before solving the electrical/mechanical network.
+For ideal rows, `w_i` is the boundary motion weight for `uniform_normal`, or
+that weight times `normal dot motion_axis` for `rigid_translation`, and
+`c_i = physical_radiator_count`: 1 for off and rigid ground, 2 for x, and 4 for xy.
+For transducer rows, `w_i = boundary_motion_sign * boundary_motion_weight *
+(normal dot normalized_motion_axis)` and `c_i = surface_completion_factor`.
+The boundary sign occurs exactly once. A single y-plane reflection would also
+imply count 2, but y-only symmetry is not a supported solve mode; y reflections currently enter through xy.
 Ground images contribute pressure but are not physical radiators.
 Thus ideal rows integrate total force over all physical copies and the diagonal
 matches the existing `radiation_impedance` self loads to round-off. Integration
@@ -267,7 +270,9 @@ Metadata supplies `component_ids`, `kinds`, `row_weights`, `definition` and
 row has `W_ii = 1`. Transducer rows integrate force per physical copy using
 `surface_completion_factor`, and their `W_ii` is `physical_driver_orbit_count`.
 Orbit never multiplies a transducer's mechanical feedback row. Metadata also
-supplies `surface_completion_factors` and `physical_driver_orbit_counts`. The
+supplies `surface_completion_factors` and `physical_driver_orbit_counts`.
+For ideal rows, `surface_completion_factors` carries the physical copy count
+(`physical_radiator_count`), while `physical_driver_orbit_counts` is 1. The
 matrix is neither symmetrized nor made passive. Its metadata diagnostics are
 `reciprocity_max_rel = max(abs(W*Z - transpose(W*Z)))/max(abs(W*Z))` (zero for a
 zero matrix), and `passivity_min_eig`, the minimum eigenvalue of
@@ -334,10 +339,13 @@ Transducers use the coupled path's LEM parameter names, rigid-translation axis,
 boundary signs/weights, optional semi-inductance and optional sealed rear chamber.
 Only BEM tags in the active exterior region may be attached. BEM precision must
 be explicitly `float64` (the exterior default is still float32, which is refused
-here). Geometry, motion/force operators, LEM parameters and the small dense
-complex network all use Float64. `solver_options.transducer_reference_voltage_v`
-defines voltage-port amplitude (default 2.83 V, finite and positive). This is the
-phasor voltage directly: the worker does not insert a square-root-of-two factor.
+here). CPU is the qualified backend for exterior transducers. Metal is explicitly
+refused: Apple GPU BEM supports Float32 only. CUDA and ROCm use generic floating
+types and can represent Float64; their exterior transducer paths remain
+unqualified by hardware gates in this slice. Geometry, motion/force operators,
+LEM parameters and the small dense complex network all use Float64. `solver_options.transducer_reference_voltage_v`
+defines voltage-port amplitude (default 2.83 V, finite and positive, validated
+before solving in both contract validators). This is the phasor voltage directly: the worker does not insert a square-root-of-two factor.
 
 The motion basis contains all transducers in compiled order, followed by the
 requested ideal sources, once per component. Ideal ports prescribe 1 m/s;
@@ -379,9 +387,13 @@ component order. Real symmetry copies are included; ground images are excluded.
 Transducer values use exactly the assembled force coefficients times orbit;
 ideal values use the same geometry and precision as their force integration.
 The metadata includes `effective_volume_area_definition`,
+`effective_volume_area_cancellation_ratio` (one value per component),
 `effective_volume_area_zero_or_near_cancelling` (one boolean per component), and
-`effective_volume_area_cancellation_relative_tolerance: 1e-8`. A component is
-flagged when `abs(S) <= 1e-8 * integral(abs(b))`, including the zero-area case.
+`effective_volume_area_cancellation_relative_tolerance: 1e-2`.
+The ratio is `abs(S) / integral_physical(abs(b))`, defined as zero when the
+absolute area is zero. A component is flagged when the ratio is at most
+`1e-2`, including the zero-area case. This is a default cancellation threshold;
+clients may apply their own threshold using the published ratio.
 Closed translating spheres/dipoles have cancelling signed area; the flag is
 expected and does not invalidate their mechanical impedance or pressure output.
 
@@ -389,8 +401,9 @@ There is no second acoustic matrix. For non-cancelling S, let
 `D_S = diag(effective_volume_area_m2)` and `W = diag(row_weights)`. Clients may
 convert the mechanical matrix Z_m to acoustic units with
 `Z_a = D_S⁻¹ (W Z_m) D_S⁻¹` (`Pa*s/m³`). Clients must refuse this conversion for
-flagged components: a dipole's local velocity cannot be represented by a single
-nonzero volume flow. No absolute-value substitution for S is valid.
+zero-area components, and should refuse near-cancelling components according to
+their chosen threshold: a dipole's local velocity cannot be represented by a
+single nonzero volume flow. No absolute-value substitution for S is valid.
 
 ### Current physical limits and compatibility gates
 
@@ -402,7 +415,20 @@ Ideal-only x/xy support is retained.
 
 The exterior BEM mesh must consist of closed, consistently outward-wound solids.
 The worker checks two oppositely oriented incidences per edge and positive signed
-volume per connected shell. Open or two-sided thin diaphragms are unsupported.
+volume per connected shell. In ground mode, a single-incidence edge is allowed
+when both endpoints lie on Y=0 (within the ground tolerance of 1e-6 m): the
+reflected surface supplies the other incidence and closes the solid. Signed
+volume is computed about an origin on Y=0, so a virtual ground cap contributes
+zero and the reflected solid has twice the positive half-solid volume. Ground
+triangles lying flat on Y=0 remain refused because they coincide with their images.
+
+Connectivity uses vertex indices, not geometric welding. Multiple independent
+closed meshes are accepted, but adjoining meshes with unwelded seams can be
+refused even when their coordinates meet; weld those seams before submission.
+Bodies sharing an indexed edge create a non-manifold edge (more than two
+incidences) and are refused; keep disjoint closed bodies separate. These checks
+do not certify self-intersections or overlapping/touching geometry.
+Open or two-sided thin diaphragms are unsupported.
 An open-back driver needs closed reconstructed front/rear moving surfaces and
 surrounding rigid surfaces to model rear radiation. A front-only cone omits rear
 loading. The optional sealed chamber supplies lumped stiffness only.

@@ -34,6 +34,7 @@ function exterior_impedance_matrix(mesh, pressures, excitations, components, tar
     completions = Float64[get(e,:completion,copy_count) for e in selected]
     areas = Float64[]
     cancelling = Bool[]
+    cancellation_ratios = Float64[]
     for (index,e) in enumerate(selected)
         amplitudes = Dict(zip(e.tags,e.amplitudes))
         contributions = [Float64(mesh.areas[f]) * get(amplitudes,mesh.physical_tags[f],0.0) *
@@ -44,7 +45,10 @@ function exterior_impedance_matrix(mesh, pressures, excitations, components, tar
         area = force_matrix === nothing ? copies * sum(contributions) :
             weights[index] * sum(force_matrix[:,column_by_component[ids[index]]])
         push!(areas,area)
-        push!(cancelling,abs(area) <= 1e-8 * copies * sum(abs,contributions))
+        absolute_area = copies * sum(abs,contributions)
+        ratio = absolute_area == 0.0 ? 0.0 : abs(area) / absolute_area
+        push!(cancellation_ratios,ratio)
+        push!(cancelling,ratio <= 1e-2)
     end
     weighted = Diagonal(weights) * matrix
     scale = maximum(abs, weighted; init=0.0)
@@ -58,7 +62,8 @@ function exterior_impedance_matrix(mesh, pressures, excitations, components, tar
         "effective_volume_area_m2" => areas,
         "effective_volume_area_definition" => "signed integral of motion factor over physical moving surfaces; real symmetry copies included; ground images excluded",
         "effective_volume_area_zero_or_near_cancelling" => cancelling,
-        "effective_volume_area_cancellation_relative_tolerance" => 1e-8,
+        "effective_volume_area_cancellation_ratio" => cancellation_ratios,
+        "effective_volume_area_cancellation_relative_tolerance" => 1e-2,
         "row_weights" => weights,
         "definition" => "force_per_unit_velocity; per-row physical-copy weighting in row_weights",
         "phasor_convention" => phasor_convention(),
@@ -69,7 +74,7 @@ function exterior_impedance_matrix(mesh, pressures, excitations, components, tar
 end
 
 """Exterior transducers currently require closed, consistently outward-wound solids."""
-function validate_exterior_transducer_surface!(mesh)
+function validate_exterior_transducer_surface!(mesh, symmetry=:off; ground_tolerance=1e-6)
     isempty(mesh.faces) && error("Exterior transducers require closed BEM surfaces.")
     edge_faces = Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
     for (index, (a,b,c)) in enumerate(mesh.faces)
@@ -77,10 +82,17 @@ function validate_exterior_transducer_surface!(mesh)
             push!(get!(edge_faces, minmax(u,v), Tuple{Int,Int}[]), (index, u < v ? 1 : -1))
         end
     end
-    all(length(entries) == 2 && entries[1][2] == -entries[2][2] for entries in values(edge_faces)) ||
-        error("Exterior transducers require closed BEM surfaces with consistent winding; open/two-sided diaphragms are unsupported.")
+    for ((u,v),entries) in edge_faces
+        # The ground image closes a boundary edge on Y=0. Every other edge
+        # still needs two opposite incidences; non-manifold edges fail.
+        ground_edge = symmetry == :ground && length(entries) == 1 &&
+            abs(mesh.vertices[u][2]) <= ground_tolerance && abs(mesh.vertices[v][2]) <= ground_tolerance
+        ground_edge || (length(entries) == 2 && entries[1][2] == -entries[2][2]) ||
+            error("Exterior transducers require closed BEM surfaces with consistent winding; open/two-sided diaphragms are unsupported.")
+    end
     neighbours = [Int[] for _ in mesh.faces]
     for entries in values(edge_faces)
+        length(entries) == 2 || continue
         a,b = entries[1][1],entries[2][1]
         push!(neighbours[a],b); push!(neighbours[b],a)
     end
@@ -90,6 +102,9 @@ function validate_exterior_transducer_surface!(mesh)
         stack = [seed]
         seen[seed] = true
         origin = mesh.vertices[first(mesh.faces[seed])]
+        # A virtual cap on Y=0 contributes zero volume about this origin;
+        # reflection gives twice this positive half-solid volume.
+        symmetry == :ground && (origin = typeof(origin)(origin[1], 0, origin[3]))
         volume = 0.0
         while !isempty(stack)
             index = pop!(stack)
@@ -110,7 +125,7 @@ end
 """All drivers first (compiled order), then requested ideal sources, once per component."""
 function exterior_motion_basis(system, requested_ports, boundaries, bem_domain, mesh, region, symmetry)
     symmetry in (:off, :ground) || error("Exterior electrodynamic_transducers support only off and ground symmetry.")
-    validate_exterior_transducer_surface!(mesh)
+    validate_exterior_transducer_surface!(mesh, symmetry)
     # Float64 here preserves LEM parameters as well as BEM geometry. No FEM tags
     # are passed: the shared parser cannot resolve a boundary into another region.
     transducers, index_by_id = electrodynamic_transducers_from_wire(
@@ -169,10 +184,14 @@ function exterior_basis_neumann(mesh, e, density, omega, operators)
     return neumann_scale(density,omega) .* Vector(operators.bem_normal_velocity[:,e.transducer_index])
 end
 
+# Keep transducer-only captures out of the ideal-path generator inventory.
+function exterior_basis_neumann_values(mesh, excitations, density, omega, operators)
+    return [exterior_basis_neumann(mesh, e, density, omega, operators) for e in excitations]
+end
+
 """Eliminate the BEM into per-copy force rows; undriven coils are shorted (V=0)."""
 function solve_exterior_lumped_network(z, transducers, basis, ports, requested_ports,
     omega, density, sound_speed, reference_voltage)
-    isfinite(reference_voltage) && reference_voltage > 0 || error("transducer_reference_voltage_v must be finite and positive.")
     d,n,c = length(transducers),length(basis),length(requested_ports)
     zm = ComplexF64[mechanical_impedance(t,omega,density,sound_speed) for t in transducers]
     ze = ComplexF64[electrical_impedance(t,omega) for t in transducers]

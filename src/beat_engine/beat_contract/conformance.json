@@ -2499,6 +2499,539 @@
           "value": "bounded_air"
         }
       ]
+    },
+    {
+      "name": "v3_exterior_trimmed_off",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "symmetry"
+          ],
+          "value": " off "
+        }
+      ]
+    },
+    {
+      "name": "v3_exterior_trimmed_ground",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "symmetry"
+          ],
+          "value": " ground "
+        }
+      ]
+    },
+    {
+      "name": "v3_exterior_metal_float64_refused",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "bem_backend"
+          ],
+          "value": "metal"
+        }
+      ],
+      "expected_message": "cannot use Metal: float64 BEM is unsupported"
+    },
+    {
+      "name": "transducer_reference_voltage_zero",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "transducer_reference_voltage_v"
+          ],
+          "value": 0
+        }
+      ],
+      "expected_message": "transducer_reference_voltage_v must be finite and positive"
+    },
+    {
+      "name": "transducer_reference_voltage_negative",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "transducer_reference_voltage_v"
+          ],
+          "value": -1
+        }
+      ],
+      "expected_message": "transducer_reference_voltage_v must be finite and positive"
+    },
+    {
+      "name": "transducer_reference_voltage_string",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "transducer_reference_voltage_v"
+          ],
+          "value": "2.83"
+        }
+      ],
+      "expected_message": "transducer_reference_voltage_v must be finite and positive"
+    },
+    {
+      "name": "transducer_reference_voltage_boolean",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "transducer_reference_voltage_v"
+          ],
+          "value": true
+        }
+      ],
+      "expected_message": "transducer_reference_voltage_v must be finite and positive"
+    },
+    {
+      "name": "transducer_reference_voltage_positive",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "contract_version"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "kind"
+          ],
+          "value": "electrodynamic_transducer"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "components",
+            0,
+            "parameters"
+          ],
+          "value": {
+            "re_ohm": 6.0,
+            "le_h": 0.0005,
+            "bl_n_per_a": 7.0,
+            "mmd_kg": 0.015,
+            "cms_m_per_n": 0.0005,
+            "rms_n_s_per_m": 1.0,
+            "motion_axis": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "path": [
+            "compiled_system",
+            "excitation_ports",
+            0,
+            "kind"
+          ],
+          "value": "voltage"
+        },
+        {
+          "path": [
+            "solver_options",
+            "precision"
+          ],
+          "value": "float64"
+        },
+        {
+          "path": [
+            "solver_options",
+            "transducer_reference_voltage_v"
+          ],
+          "value": 1
+        }
+      ]
     }
   ]
 }

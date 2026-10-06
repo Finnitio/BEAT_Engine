@@ -266,7 +266,18 @@ end
             r["solver_options"]["symmetry"]=symmetry
             @test_throws "support only off and ground symmetry" solve_request(r)
         end
-        r["solver_options"]["symmetry"]="ground"
+        r["solver_options"]["symmetry"]="off"
+        r["solver_options"]["bem_backend"]="metal"
+        @test_throws "cannot use Metal: float64 BEM is unsupported" solve_request(r)
+        @test_throws "cannot use Metal: float64 BEM is unsupported" solve_exterior_request(r,r["compiled_system"],r["compiled_system"]["regions"][1])
+        r["solver_options"]["bem_backend"]="cpu"
+        for voltage in (0., -1., Inf, NaN)
+            r["solver_options"]["transducer_reference_voltage_v"]=voltage
+            @test_throws Exception solve_request(r)
+            @test_throws "must be finite and positive" solve_exterior_request(r,r["compiled_system"],r["compiled_system"]["regions"][1])
+        end
+        delete!(r["solver_options"],"transducer_reference_voltage_v")
+        r["solver_options"]["symmetry"]=" ground "
         items=quantities(only(captured(r)))
         @test items["radiation_impedance_matrix"]["metadata"]["row_weights"] == [1.]
         @test items["diaphragm_velocity"]["metadata"]["physical_driver_orbit_counts"] == [1]
@@ -310,8 +321,50 @@ end
             @test only(meta["effective_volume_area_m2"]) ≈ -4a^2 rtol=1e-14
             @test meta["effective_volume_area_zero_or_near_cancelling"] == [false]
             @test meta["row_weights"] == [1.]
+            @test meta["effective_volume_area_cancellation_ratio"] ≈ [1.]
+            @test meta["effective_volume_area_cancellation_relative_tolerance"] == 1e-2
         end
     end
+end
+
+@testset "area cancellation ratio and topology limits" begin
+    mesh=sphere(0.1,SVector(0.,0.,0.),2;refinements=0)
+    tags=[n[3] > 0 ? 2 : 3 for n in mesh.normals]
+    patch=BoundaryMesh(mesh.vertices,mesh.faces,tags)
+    e=(component_id="near-dipole",tags=[2,3],amplitudes=[1.,0.99],motion_axis=SVector(0.,0.,1.))
+    _,meta=exterior_impedance_matrix(patch,[zeros(ComplexF64,length(mesh.vertices))],[e],
+        [Dict("id"=>"near-dipole")],String[],:off)
+    @test only(meta["effective_volume_area_cancellation_ratio"]) ≈ 0.01/1.99
+    @test meta["effective_volume_area_zero_or_near_cancelling"] == [true]
+    empty_motion=merge(e,(amplitudes=[0.,0.],))
+    _,empty_meta=exterior_impedance_matrix(patch,[zeros(ComplexF64,length(mesh.vertices))],[empty_motion],
+        [Dict("id"=>"near-dipole")],String[],:off)
+    @test empty_meta["effective_volume_area_cancellation_ratio"] == [0.]
+    @test empty_meta["effective_volume_area_zero_or_near_cancelling"] == [true]
+    @test validate_exterior_transducer_surface!(join_meshes(mesh,mesh)) === nothing
+    nonmanifold=BoundaryMesh(mesh.vertices,vcat(mesh.faces,mesh.faces),vcat(mesh.physical_tags,mesh.physical_tags))
+    @test_throws "consistent winding" validate_exterior_transducer_surface!(nonmanifold)
+    # Coincident coordinates on independently indexed faces do not weld seams.
+    vertices=[mesh.vertices[v] for f in mesh.faces for v in f]
+    unwelded=BoundaryMesh(vertices,[(3i-2,3i-1,3i) for i in eachindex(mesh.faces)],mesh.physical_tags)
+    @test_throws "closed BEM surfaces" validate_exterior_transducer_surface!(unwelded)
+    upper=[i for i in eachindex(mesh.faces) if mesh.normals[i][2] > 0]
+    used=sort(unique([v for i in upper for v in mesh.faces[i]]))
+    remap=Dict(v=>i for (i,v) in enumerate(used))
+    half=BoundaryMesh(mesh.vertices[used],[Tuple(remap[v] for v in mesh.faces[i]) for i in upper],mesh.physical_tags[upper])
+    @test validate_exterior_transducer_surface!(half,:ground) === nothing
+    @test_throws "closed BEM surfaces" validate_exterior_transducer_surface!(half,:off)
+    inward=BoundaryMesh(half.vertices,[(a,c,b) for (a,b,c) in half.faces],half.physical_tags)
+    @test_throws "outward-wound" validate_exterior_transducer_surface!(inward,:ground)
+    open=BoundaryMesh(half.vertices,half.faces[2:end],half.physical_tags[2:end])
+    @test_throws "closed BEM surfaces" validate_exterior_transducer_surface!(open,:ground)
+    # Ground closes the half sphere; tangential motion is even under reflection.
+    motion=(component_id="half",tags=[2],amplitudes=[1.],motion_axis=SVector(0.,0.,1.))
+    # Adjacent image pairs need more quadrature than the separated-body case.
+    # Keep the 1e-6 comparison tolerance and converge both discretisations.
+    pg=only(pressure_columns(half,[motion],2pi*100.,1.21,343.;symmetry=:ground,order=8))
+    pf=only(pressure_columns(mesh,[motion],2pi*100.,1.21,343.;order=8))
+    @test pg ≈ pf[used] rtol=1e-6
 end
 
 end # module

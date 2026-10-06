@@ -956,6 +956,11 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
     has_transducers && FloatType !== Float64 && error("Exterior electrodynamic_transducers require float64 BEM precision.")
     backend = Symbol(lowercase(String(get(options, "bem_backend", "cpu"))))
     backend in (:cpu, :cuda, :rocm, :metal) || error("Exterior BEM backend must be cpu, cuda, rocm, or metal.")
+    has_transducers && backend == :metal && error(
+        "Exterior electrodynamic_transducers cannot use Metal: float64 BEM is unsupported; use CPU.",
+    )
+    reference_voltage = Float64(get(options, "transducer_reference_voltage_v", DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V))
+    isfinite(reference_voltage) && reference_voltage > 0 || error("transducer_reference_voltage_v must be finite and positive.")
     requested_assembly = lowercase(String(get(options, "burton_miller_assembly", "direct_system")))
     requested_assembly in ("direct_system", "operator_matrices") || error(
         "Exterior burton_miller_assembly must be direct_system or operator_matrices.",
@@ -1114,8 +1119,8 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
     produce_metal_system = function (index)
         omega = FloatType(2pi) * FloatType(frequencies_hz[index])
         wavenumber = omega / sound_speed
-        neumann_values = [has_transducers ? exterior_basis_neumann(mesh, excitation, density, omega, lumped.operators) :
-            exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
+        # Metal is ideal-only: preserve the precompiled producer/generator captures.
+        neumann_values = [exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
         system, assembly_s = assemble_exterior_direct_metal(
             mesh, p1_space, dp0_space, neumann_values, wavenumber, base_rule; metal_fused_kwargs...,
         )
@@ -1182,8 +1187,9 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                     symmetry_mode=symmetry_mode,
                 )
             end : nothing
-            neumann_values = [has_transducers ? exterior_basis_neumann(mesh, excitation, density, omega, lumped.operators) :
-                exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
+            neumann_values = has_transducers ?
+                exterior_basis_neumann_values(mesh, excitations, density, omega, lumped.operators) :
+                [exterior_neumann(mesh, excitation, density, omega) for excitation in excitations]
             operators = nothing
             metal_solve_method = :lu
             exterior_rhs = nothing
@@ -1287,7 +1293,7 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                 z = transpose(lumped.force) * p
                 network_solution = solve_exterior_lumped_network(
                     z, lumped.transducers, excitations, port_objects, excitation_port_ids, omega, density, sound_speed,
-                    Float64(get(options, "transducer_reference_voltage_v", DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V)),
+                    reference_voltage,
                 )
                 pressures = collect(eachcol(p * network_solution.velocity))
                 neumann_values = collect(eachcol(q * network_solution.velocity))
@@ -2170,8 +2176,8 @@ function solve_interior_request(request, system, bounded_regions; event_mode=fal
             DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V,
         ),
     )
-    transducer_reference_voltage_v > zero(FloatType) || error(
-        "transducer_reference_voltage_v must be greater than zero.",
+    isfinite(transducer_reference_voltage_v) && transducer_reference_voltage_v > zero(FloatType) || error(
+        "transducer_reference_voltage_v must be finite and positive.",
     )
     fem_consistent_mass_weight = FloatType(
         get(solver_options, "fem_consistent_mass_weight", 1.0),
@@ -2666,8 +2672,8 @@ function solve_request_impl(request; event_mode=false)
             DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V,
         ),
     )
-    transducer_reference_voltage_v > zero(FloatType) || error(
-        "transducer_reference_voltage_v must be greater than zero.",
+    isfinite(transducer_reference_voltage_v) && transducer_reference_voltage_v > zero(FloatType) || error(
+        "transducer_reference_voltage_v must be finite and positive.",
     )
     mesh_setup_started = time_ns()
     fem_domains = aggregate_fem_domains(

@@ -150,13 +150,30 @@ def _impedance_outputs(request: dict) -> None:
     exterior_transducers = not any(region["kind"] == "bounded_air" for region in system["regions"]) and any(
         component["kind"] == "electrodynamic_transducer" for component in components.values()
     )
+    options = request["solver_options"]
+    if "transducer_reference_voltage_v" in options:
+        voltage = options["transducer_reference_voltage_v"]
+        if (
+            isinstance(voltage, bool)
+            or not isinstance(voltage, (int, float))
+            or not math.isfinite(voltage)
+            or voltage <= 0
+        ):
+            _fail(
+                "request.solver_options.transducer_reference_voltage_v",
+                "transducer_reference_voltage_v must be finite and positive",
+            )
     if exterior_transducers:
-        options = request["solver_options"]
+        if str(options.get("bem_backend", "cpu")).lower() == "metal":
+            _fail(
+                "request.solver_options.bem_backend",
+                "exterior electrodynamic_transducers cannot use Metal: float64 BEM is unsupported; use CPU",
+            )
         if str(options.get("precision", "float32")).lower() != "float64":
             _fail(
                 "request.solver_options.precision", "exterior electrodynamic_transducers require float64 BEM precision"
             )
-        if str(options.get("symmetry", "off")).lower() not in ("off", "ground"):
+        if str(options.get("symmetry", "off")).strip().lower() not in ("off", "ground"):
             _fail(
                 "request.solver_options.symmetry",
                 "exterior electrodynamic_transducers support only off and ground symmetry",

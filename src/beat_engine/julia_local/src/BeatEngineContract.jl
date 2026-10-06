@@ -151,11 +151,20 @@ function impedance_outputs(request)
         if port["id"] in request["excitation_port_ids"])
     components = Dict(component["id"] => component for component in system["components"])
     exterior = !any(region["kind"] == "bounded_air" for region in system["regions"])
+    options = request["solver_options"]
+    if haskey(options, "transducer_reference_voltage_v")
+        voltage = options["transducer_reference_voltage_v"]
+        voltage isa Real && !(voltage isa Bool) && isfinite(voltage) && voltage > 0 ||
+            fail("request.solver_options.transducer_reference_voltage_v",
+                "transducer_reference_voltage_v must be finite and positive")
+    end
     if exterior && any(component["kind"] == "electrodynamic_transducer" for component in values(components))
-        options = request["solver_options"]
+        lowercase(String(get(options, "bem_backend", "cpu"))) == "metal" &&
+            fail("request.solver_options.bem_backend",
+                "exterior electrodynamic_transducers cannot use Metal: float64 BEM is unsupported; use CPU")
         lowercase(String(get(options, "precision", "float32"))) == "float64" ||
             fail("request.solver_options.precision", "exterior electrodynamic_transducers require float64 BEM precision")
-        lowercase(String(get(options, "symmetry", "off"))) in ("off", "ground") ||
+        lowercase(strip(String(get(options, "symmetry", "off")))) in ("off", "ground") ||
             fail("request.solver_options.symmetry", "exterior electrodynamic_transducers support only off and ground symmetry")
     end
     for output in request["outputs"]
