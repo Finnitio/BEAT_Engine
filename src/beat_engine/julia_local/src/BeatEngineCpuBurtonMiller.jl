@@ -468,22 +468,44 @@ function assemble_burton_miller_neumann_system_cpu(
     )
 end
 
+function beat_cpu_lu_refinement_steps()
+    value = get(ENV, "BLAB_BEAT_CPU_LU_REFINEMENT_STEPS", "0")
+    steps = tryparse(Int, value)
+    steps !== nothing && 0 <= steps <= 3 || throw(ArgumentError(
+        "BLAB_BEAT_CPU_LU_REFINEMENT_STEPS must be an integer in 0:3"))
+    return steps
+end
+
 """
     solve_burton_miller_neumann_system_cpu_with_report(system; method=beat_dense_solve_method())
 
-Solve the fused CPU system, choosing dense LU or diagonally preconditioned
-GMRES by cost model. Returns `(pressure, report)`; see
-`beat_solve_dense_system`.
-
-The matrix is preserved: `lu!` would overwrite it, and the caller may hold it
-for a diagnostic or a second solve. GMRES never writes to it, so the GMRES
-route also skips the copy the LU route needs.
+Solve the fused CPU system, preserving its matrix. The default LU/GMRES
+selection and results are unchanged. ComplexF32 LU solves can opt into 1–3
+Float64-residual corrections with `refinement_steps` or
+`BLAB_BEAT_CPU_LU_REFINEMENT_STEPS` (default 0). This refines the rounded
+operator, not its assembly. Float64 solves retain their ordinary path.
+The report distinguishes residual convergence from the correction limit.
 """
-function solve_burton_miller_neumann_system_cpu_with_report(system; method::Symbol=beat_dense_solve_method())
-    return beat_solve_dense_system(system.matrix, system.rhs; method=method, preserve_matrix=true)
+function solve_burton_miller_neumann_system_cpu_with_report(system;
+        method::Symbol=beat_dense_solve_method(),
+        refinement_steps::Int=beat_cpu_lu_refinement_steps(), refinement_rtol::Real=1e-10)
+    if refinement_steps == 0 || eltype(system.matrix) === ComplexF64
+        return beat_solve_dense_system(system.matrix, system.rhs; method=method, preserve_matrix=true)
+    end
+    eltype(system.matrix) === ComplexF32 || throw(ArgumentError("CPU LU refinement requires ComplexF32"))
+    plan = beat_dense_solve_plan(size(system.matrix, 1), size(system.rhs, 2); method=method)
+    plan.method === :lu || throw(ArgumentError("CPU LU refinement requires an LU solve; select method=:lu"))
+    seconds = @elapsed pressure, refinement = beat_refine_cpu_lu(system.matrix, system.rhs;
+        max_steps=refinement_steps, rtol=refinement_rtol)
+    return pressure, (
+        plan=plan, method=:lu, fell_back=false, fallback_reason=nothing,
+        iterations=Int[], relative_residuals=Float32[], termination_reasons=Symbol[],
+        iteration_budget=nothing, warm_start_used=falses(size(system.rhs, 2)),
+        tolerance=_beat_gmres_tolerance(Float32), seconds=seconds, refinement=refinement,
+    )
 end
 
-function solve_burton_miller_neumann_system_cpu(system; method::Symbol=beat_dense_solve_method())
-    pressure, _ = solve_burton_miller_neumann_system_cpu_with_report(system; method=method)
+function solve_burton_miller_neumann_system_cpu(system; method::Symbol=beat_dense_solve_method(), kwargs...)
+    pressure, _ = solve_burton_miller_neumann_system_cpu_with_report(system; method=method, kwargs...)
     return pressure
 end

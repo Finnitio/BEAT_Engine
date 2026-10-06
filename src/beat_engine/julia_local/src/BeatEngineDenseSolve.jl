@@ -1148,13 +1148,17 @@ function describe_dense_solve(report)
             "($iterations iterations, relative residual $(round(residual; sigdigits=3))): " *
             "$(plan.dofs) dofs, $(plan.drives) drive(s)"
     end
-    return "Julia direct dense solve ($selection): $(plan.dofs) dofs, $(plan.drives) drive(s)"
+    description = "Julia direct dense solve ($selection): $(plan.dofs) dofs, $(plan.drives) drive(s)"
+    if hasproperty(report, :refinement)
+        description *= "; Float64 residual refinement $(report.refinement.steps) step(s), $(report.refinement.status)"
+    end
+    return description
 end
 
 # Both public drivers expose the same per-frequency facts. Residuals and
 # iterations describe attempted GMRES drives even when LU supplied the answer.
 function beat_dense_solve_diagnostics(report)
-    return Dict{String,Any}(
+    diagnostics = Dict{String,Any}(
         "dense_solve_method" => String(report.method),
         "dense_solve_selection" => String(report.plan.reason),
         "dense_solve_recent_fallback_hz" => get(report.plan, :fallback_frequency_hz, nothing),
@@ -1169,4 +1173,12 @@ function beat_dense_solve_diagnostics(report)
         "dense_solve_model_lu_s" => report.plan.lu_model_seconds,
         "dense_solve_model_gmres_s" => report.plan.gmres_model_seconds,
     )
+    if hasproperty(report, :refinement)
+        diagnostics["dense_solve_refinement_steps"] = report.refinement.steps
+        diagnostics["dense_solve_refinement_status"] = String(report.refinement.status)
+        diagnostics["dense_solve_refinement_working_residuals"] = report.refinement.working_relative_residuals
+        diagnostics["dense_solve_refinement_returned_residuals"] = report.refinement.returned_relative_residuals
+        diagnostics["dense_solve_refinement_operator"] = "rounded_float32"
+    end
+    return diagnostics
 end

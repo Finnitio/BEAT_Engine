@@ -16,6 +16,7 @@ metal_available() = false
 include(joinpath(@__DIR__, "fixture_integrity_tests.jl"))
 include(joinpath(@__DIR__, "..", "src", "BeatEngineCore.jl"))
 using .BeatEngineCore
+include(joinpath(@__DIR__, "cpu_refinement_tests.jl"))
 include(joinpath(@__DIR__, "compiled_ground_contract_tests.jl"))
 include(joinpath(@__DIR__, "source_ground_contract_tests.jl"))
 include(joinpath(@__DIR__, "analytical_exterior_tests.jl"))
