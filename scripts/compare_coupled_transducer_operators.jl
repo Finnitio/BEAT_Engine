@@ -7,7 +7,7 @@ const ENGINE_DIR = joinpath(@__DIR__,"..","src","beat_engine","julia_local")
 include(joinpath(@__DIR__,"..","src","beat_engine","julia_engine","CompiledCoupledWorkload.jl"))
 end
 module LegacyCoupled
-const BASE_REVISION = "10cba4fcdba2773ee5bcbea485df1717bc57b489"
+const BASE_REVISION = "049381bed9b6c3d9e84d4c71832e148c45385cf4"
 const ROOT = normpath(joinpath(@__DIR__,".."))
 const ENGINE_DIR = joinpath(ROOT,"src","beat_engine","julia_local")
 base_source(file) = read(Cmd(["git","-C",ROOT,"show","$BASE_REVISION:src/beat_engine/julia_local/$file"]),String)

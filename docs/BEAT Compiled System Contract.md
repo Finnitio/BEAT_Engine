@@ -441,7 +441,7 @@ The standalone gates `tests/exterior_transducer_tests.jl` and
 phasors, dense monolithic elimination, shorted undriven response, mixed ports,
 area metadata, opt-in outputs and refusals. `scripts/compare_exterior_legacy.jl`
 retains the ideal-only byte gate. `scripts/compare_coupled_transducer_operators.jl`
-loads the pre-split coupled source at `10cba4fc`, compares every sparse operator's
+loads the pre-split coupled source from the preceding commit (`049381b`, the last commit before the split), compares every sparse operator's
 structure and value bytes on packaged coupled fixtures in both precisions, and
 compares all requested coupled result quantity bytes in both conventions.
 No frozen baseline is rewritten. CPU qualification does not qualify accelerator
