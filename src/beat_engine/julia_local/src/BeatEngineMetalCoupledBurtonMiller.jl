@@ -45,6 +45,7 @@ end
 function _launch_metal_coupled_pair_kernels!(
     lhs,
     rhs_operator,
+    blocks,
     cache::MetalRegularAssemblyCache,
     k,
     pair_offsets,
@@ -68,46 +69,28 @@ function _launch_metal_coupled_pair_kernels!(
     groupsize = _metal_kernel_groupsize()
     p1_count = Int32(cache.p1_dof_count)
     timed = get(ENV, "BLAB_METAL_GATHER_TIMING", "0") == "1"
+    packed = _metal_packed_pair_tables_for(cache)
     timed && Metal.synchronize()
     stamp = time()
     for chunk in 1:tables.chunk_count
         chunk_start = (chunk - 1) * chunk_size + 1
         chunk_count = min(chunk_size, element_count - chunk_start + 1)
+        # One transform per launch and gather, so each pair block is overwritten (no accumulation).
         Metal.@metal threads=(tile_x, tile_y) groups=(cld(element_count, tile_x), cld(chunk_count, tile_y)) _metal_fused_pair_blocks_kernel!(
-            tables.blocks,
-            cache.face_vertices,
-            cache.normals,
-            cache.areas,
-            cache.faces,
-            cache.curls,
-            cache.rule_points,
-            cache.rule_weights,
-            cache.element_rule_points,
-            tables.elements,
-            Int32(element_count),
-            Int32(chunk_start),
-            Int32(chunk_count),
-            pair_stride,
-            k,
-            inv(k),
-            Int32(cache.face_count),
-            Val(rule_count),
-            pair_offsets,
-            singular_trial_indices,
-            skip_mode,
-            trial_sign_x,
-            trial_sign_y,
-            trial_sign_z,
-            trial_curl_sign_x,
-            trial_curl_sign_y,
-            trial_curl_sign_z,
+            blocks, packed.points4, packed.normals4, cache.areas, packed.curls4, cache.faces, tables.elements,
+            cache.rule_points, cache.rule_weights,
+            Int32(element_count), Int32(chunk_start), Int32(chunk_count), pair_stride,
+            k, inv(k), Int32(cache.face_count), Val(packed.rule), Val(rule_count),
+            pair_offsets, singular_trial_indices, skip_mode,
+            trial_sign_x, trial_sign_y, trial_sign_z, trial_curl_sign_x, trial_curl_sign_y, trial_curl_sign_z,
+            Val(false),
         )
         stamp = _metal_gather_stage!("fused_pairs", timed, stamp)
         _metal_launch(
             _metal_coupled_flux_gather_kernel!,
             cache.p1_dof_count * chunk_count,
             rhs_operator,
-            tables.blocks,
+            blocks,
             tables.elements,
             tables.element_positions,
             cache.vertex_offsets,
@@ -128,7 +111,7 @@ function _launch_metal_coupled_pair_kernels!(
             _metal_fused_lhs_gather_kernel!,
             cache.p1_dof_count * node_count,
             lhs,
-            tables.blocks,
+            blocks,
             tables.element_positions,
             cache.vertex_offsets,
             cache.incident_elements,
@@ -165,28 +148,31 @@ function _launch_metal_coupled_singular_kernels!(
     csx = T(transform.determinant * transform.signs[1])
     csy = T(transform.determinant * transform.signs[2])
     csz = T(transform.determinant * transform.signs[3])
-    rule_point_count = length(singular_cache.rule_weights)
     part_count = _metal_singular_part_count()
     # Same maps the four-operator path uses: the fused left-hand side lands on
     # the same P1-row/P1-column cells as the double layer and hypersingular.
-    gather_tables = _metal_singular_gather_tables(regular_cache, singular_cache, part_count)
+    gather_tables = lock(() -> _metal_singular_gather_tables(regular_cache, singular_cache, part_count), _metal_packed_cache_lock)
     value_count = pair_count * part_count
     lhs_values = rhs_values = nothing
     try
         lhs_values = Metal.zeros(eltype(lhs), value_count, 9)
         rhs_values = Metal.zeros(eltype(lhs), value_count, 3)
-        _metal_launch(
-            _metal_singular_fused_bm_blocks_kernel!,
-            value_count,
-            lhs_values, rhs_values,
-            singular_cache.test_indices, singular_cache.trial_indices, singular_cache.rule_indices,
-            singular_cache.jac_scales, singular_cache.normal_products, singular_cache.rule_offsets,
-            singular_cache.rule_test_points, singular_cache.rule_trial_points, singular_cache.rule_weights,
-            regular_cache.face_vertices, regular_cache.normals, regular_cache.curls,
-            k, inv(k), Int32(regular_cache.face_count), Int32(pair_count),
-            Int32(rule_point_count), Int32(part_count),
-            sx, sy, sz, csx, csy, csz,
-        )
+        # The exterior fused path's packed singular blocks, grouped by rule point count.
+        tables = _metal_fused_singular_tables_for(regular_cache, singular_cache)
+        packed = _metal_packed_pair_tables_for(regular_cache)
+        for (point_count, positions) in tables.groups
+            group_count = length(positions)
+            _metal_launch(
+                _metal_fused_singular_packed_kernel!, group_count * part_count,
+                lhs_values, rhs_values, positions,
+                singular_cache.test_indices, singular_cache.trial_indices, singular_cache.rule_indices,
+                singular_cache.jac_scales, singular_cache.normal_products, singular_cache.rule_offsets,
+                tables.rule_points4, singular_cache.rule_weights, tables.vertices4, packed.normals4, packed.curls4,
+                k, inv(k), Int32(group_count), Int32(pair_count),
+                sx, sy, sz, csx, csy, csz,
+                Val(point_count), Val(part_count),
+            )
+        end
         for (destination, values, block_map) in (
             (lhs, lhs_values, gather_tables.p1_p1),
             (rhs_operator, rhs_values, gather_tables.p1_dp0),
@@ -263,20 +249,25 @@ function assemble_coupled_burton_miller_metal(
     isfinite(signed_k) && !iszero(signed_k) || error("Combined Metal assembly needs finite nonzero k.")
     owns_identity = identity_cache === nothing
     owns_identity && (identity_cache = build_metal_coupled_identity_cache(prepared, T))
-    a = c = nothing
+    a = c = blocks = nothing
     succeeded = false
     try
         storage = metal_operator_storage_mode()
+        # Pair buffer for one gather chunk (24 floats per pair); the gather tables no longer own it.
+        if !isempty(cache.element_indices)
+            tables = _metal_fused_gather_tables(cache)
+            blocks = MtlArray{Float32}(undef, _METAL_FUSED_COMPONENTS * length(cache.element_indices) * tables.chunk_size)
+        end
         a = Metal.zeros(Complex{T}, prepared.p1.global_dof_count, prepared.p1.global_dof_count; storage=storage)
         c = Metal.zeros(Complex{T}, prepared.p1.global_dof_count, prepared.dp0.global_dof_count; storage=storage)
         empty!(_metal_gather_stage_timing)
         _launch_metal_coupled_pair_kernels!(
-            a, c, cache, signed_k, cache.vertex_offsets, cache.incident_elements, Int32(0),
+            a, c, blocks, cache, signed_k, cache.vertex_offsets, cache.incident_elements, Int32(0),
             one(T), one(T), one(T), one(T), one(T), one(T),
         )
         for (transform, image_cache) in zip(cache.image_transforms, cache.image_singular_caches)
             _launch_metal_coupled_pair_kernels!(
-                a, c, cache, signed_k, image_cache.pair_offsets, image_cache.trial_indices, Int32(1),
+                a, c, blocks, cache, signed_k, image_cache.pair_offsets, image_cache.trial_indices, Int32(1),
                 T(transform.signs[1]), T(transform.signs[2]), T(transform.signs[3]),
                 T(transform.determinant * transform.signs[1]),
                 T(transform.determinant * transform.signs[2]),
@@ -312,6 +303,7 @@ function assemble_coupled_burton_miller_metal(
     finally
         Metal.synchronize()
         owns_identity && release_metal_coupled_identity_cache!(identity_cache)
+        blocks === nothing || Metal.unsafe_free!(blocks)
         if !succeeded
             a === nothing || Metal.unsafe_free!(a)
             c === nothing || Metal.unsafe_free!(c)
