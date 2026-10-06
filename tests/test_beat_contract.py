@@ -67,8 +67,10 @@ def test_engine_conformance_cases(case):
     if case["valid"]:
         validate_solve_request(request)
     else:
-        with pytest.raises(ValueError, match="BEAT contract"):
+        with pytest.raises(ValueError, match="BEAT contract") as error:
             validate_solve_request(request)
+        if "expected_message" in case:
+            assert case["expected_message"] in str(error.value)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), object()])

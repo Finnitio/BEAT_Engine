@@ -251,14 +251,18 @@ Here `p_j` is the returned multi-RHS boundary pressure for component j, includin
 all symmetry images. `w_i` is its boundary motion weight for `uniform_normal`, or
 that weight times `normal dot motion_axis` for `rigid_translation`. The projection
 has one sign. `c_i = physical_radiator_count`: 1 for off and rigid ground, 2 for x,
-and 4 for xy. Ground images contribute pressure but are not physical radiators.
+and 4 for xy. A single y-plane reflection would also imply count 2, but y-only
+symmetry is not a supported solve mode; y reflections currently enter through xy.
+Ground images contribute pressure but are not physical radiators.
 Thus ideal rows integrate total force over all physical copies and the diagonal
 matches the existing `radiation_impedance` self loads to round-off. Integration
-uses Float64 on the host; this does not recover accuracy lost in Float32 BEM.
+uses Float64 arithmetic on the host, but the weights, axes, areas and normals
+have already been rounded to the worker precision before promotion. This does
+not recover accuracy lost in Float32 geometry, source parameters or BEM.
 
 Metadata supplies `component_ids`, `kinds`, `row_weights`, `definition` and
 `phasor_convention`. The definition is
-`total_force_on_physical_radiators_per_unit_velocity_of_all_copies`. Every ideal
+`force_per_unit_velocity; per-row physical-copy weighting in row_weights`. Every ideal
 row has `W_ii = 1`. Future transducer rows will instead integrate force per copy
 using completion factors and use physical orbit counts as row weights. The
 matrix is neither symmetrized nor made passive. Its metadata diagnostics are
@@ -274,3 +278,27 @@ be excited** and refuses otherwise with a clear error; it never shrinks that
 axis. Use the matrix output when only an excited subset is wanted. Transducer
 networks, passive radiators and bounded/coupled matrix outputs are not supported
 by this addition.
+
+The opt-in compatibility harness `scripts/compare_exterior_legacy.jl` loads the
+driver and original force-integration helper from Git revision
+`4839c7e62d45295489cac919c5e4b8d36b1b0f1f` into a separate module. It uses the
+unchanged `two_tetrahedra.msh` fixture, two excitation ports in reversed component
+order, two frequencies, both precisions, both phasors and both source profiles.
+It compares every quantity object and decoded/base64 bytes exactly, including
+shape, dtype, axes, units, encoding and metadata, plus frequency and excitation
+order. Run-dependent timing/provenance diagnostics are outside this quantity
+comparison. Other numerical dependencies are shared and unchanged from that
+revision. The harness is deliberately absent from `runtests.jl` and requires the
+pinned revision in the local Git object database.
+
+From the repository root, run through the compute broker with `BROKER` and
+`JULIA` set to the configured executables:
+
+```sh
+"$BROKER" submit --lane compute --expected 2 --priority 2 \
+  --requester "Hornlab Fusion add-in redesign (Track B producer)" \
+  --purpose "Verify exterior output bytes against the pinned legacy driver" \
+  --cwd "$PWD" \
+  --shell "'$JULIA' --threads=2 --startup-file=no --project=src/beat_engine/julia_local scripts/compare_exterior_legacy.jl"
+"$BROKER" wait <job-id> --timeout 540
+```

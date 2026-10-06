@@ -11,6 +11,9 @@ function exterior_impedance_matrix(mesh, pressures, excitations, components, tar
     all(id -> haskey(column_by_component, id), ids) ||
         error("radiation_impedance_matrix targets must be known excited ideal components.")
     matrix = zeros(ComplexF64, length(ids), length(ids))
+    # Ideal rows integrate all real copies; future transducer rows pass completion
+    # here instead, keeping their orbit count in row_weights.
+    copy_count = physical_radiator_count(symmetry_mode)
     for (j, source_id) in enumerate(ids)
         pressure = ComplexF64.(pressures[column_by_component[source_id]])
         for (i, receiver_id) in enumerate(ids)
@@ -21,7 +24,7 @@ function exterior_impedance_matrix(mesh, pressures, excitations, components, tar
             if get(excitation, :motion_axis, nothing) !== nothing
                 receiver = merge(receiver, (motion_axis=Float64.(excitation.motion_axis),))
             end
-            matrix[i,j] = exterior_component_impedance(mesh, pressure, receiver, symmetry_mode, Float64)
+            matrix[i,j] = exterior_component_force(mesh, pressure, receiver, copy_count, Float64)
         end
     end
     weights = ones(Float64, length(ids))
@@ -33,7 +36,7 @@ function exterior_impedance_matrix(mesh, pressures, excitations, components, tar
         "component_ids" => ids,
         "kinds" => fill("ideal_velocity_source", length(ids)),
         "row_weights" => weights,
-        "definition" => "total_force_on_physical_radiators_per_unit_velocity_of_all_copies",
+        "definition" => "force_per_unit_velocity; per-row physical-copy weighting in row_weights",
         "phasor_convention" => phasor_convention(),
         "reciprocity_max_rel" => reciprocity,
         "passivity_min_eig" => passivity,

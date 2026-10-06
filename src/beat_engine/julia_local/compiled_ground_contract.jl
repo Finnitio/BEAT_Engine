@@ -54,6 +54,11 @@ physical_radiator_count(symmetry_mode) =
     symmetry_mode == :ground ? 1 : symmetry_reduction_factor(symmetry_mode)
 
 function exterior_component_impedance(mesh, pressure, excitation, symmetry_mode, ::Type{T}) where {T<:AbstractFloat}
+    return exterior_component_force(mesh, pressure, excitation, physical_radiator_count(symmetry_mode), T)
+end
+
+"""Integrate force with an explicit row completion / physical-copy multiplier."""
+function exterior_component_force(mesh, pressure, excitation, copy_count, ::Type{T}) where {T<:AbstractFloat}
     force = zero(Complex{T})
     amplitude_by_tag = Dict(zip(excitation.tags, excitation.amplitudes))
     for face_index in eachindex(mesh.faces)
@@ -65,5 +70,5 @@ function exterior_component_impedance(mesh, pressure, excitation, symmetry_mode,
         force += get(excitation, :motion_axis, nothing) === nothing ? contribution :
             contribution * exterior_motion_factor(excitation, mesh.normals[face_index], T)
     end
-    return force * T(physical_radiator_count(symmetry_mode))
+    return force * T(copy_count)
 end

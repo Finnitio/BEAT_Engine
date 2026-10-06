@@ -25,7 +25,11 @@ const CONTRACT_CORPUS = JSON.parsefile(joinpath(@__DIR__, "..", "..", "beat_cont
             if case["valid"]
                 @test validate_system_request(request) === nothing
             else
-                @test_throws ErrorException validate_system_request(request)
+                if haskey(case, "expected_message")
+                    @test_throws case["expected_message"] validate_system_request(request)
+                else
+                    @test_throws ErrorException validate_system_request(request)
+                end
             end
         end
     end

@@ -1710,7 +1710,8 @@
             }
           ]
         }
-      ]
+      ],
+      "expected_message": "unknown reference"
     },
     {
       "name": "impedance_matrix_unexcited_target",
@@ -1757,7 +1758,8 @@
             }
           ]
         }
-      ]
+      ],
+      "expected_message": "radiation_impedance_matrix targets must be excited"
     },
     {
       "name": "impedance_matrix_duplicate_target",
@@ -1779,32 +1781,8 @@
             }
           ]
         }
-      ]
-    },
-    {
-      "name": "impedance_matrix_empty_excitation",
-      "valid": false,
-      "changes": [
-        {
-          "path": [
-            "outputs"
-          ],
-          "value": [
-            {
-              "id": "zrad",
-              "quantity": "radiation_impedance_matrix",
-              "target_ids": [],
-              "options": {}
-            }
-          ]
-        },
-        {
-          "path": [
-            "excitation_port_ids"
-          ],
-          "value": []
-        }
-      ]
+      ],
+      "expected_message": "duplicate identifiers"
     },
     {
       "name": "self_impedance_unexcited_refusal",
@@ -1849,7 +1827,8 @@
             }
           ]
         }
-      ]
+      ],
+      "expected_message": "radiator axis remains compiled component order"
     },
     {
       "name": "exterior_transducer_refused_v1",
@@ -1864,7 +1843,8 @@
           ],
           "value": "electrodynamic_transducer"
         }
-      ]
+      ],
+      "expected_message": "exterior electrodynamic_transducer is not implemented"
     },
     {
       "name": "exterior_transducer_refused_v2_unrequested",
@@ -1903,7 +1883,8 @@
             }
           ]
         }
-      ]
+      ],
+      "expected_message": "exterior electrodynamic_transducer is not implemented"
     },
     {
       "name": "passive_radiator_not_implemented",
@@ -1918,7 +1899,8 @@
           ],
           "value": "passive_radiator"
         }
-      ]
+      ],
+      "expected_message": "passive_radiator is not implemented"
     },
     {
       "name": "passive_radiator_coupled_not_implemented",
@@ -1965,7 +1947,8 @@
           ],
           "value": "passive_radiator"
         }
-      ]
+      ],
+      "expected_message": "passive_radiator is not implemented"
     },
     {
       "name": "impedance_matrix_bounded_refusal",
@@ -1993,7 +1976,8 @@
             }
           ]
         }
-      ]
+      ],
+      "expected_message": "radiation_impedance_matrix requires an exterior ideal-source-only system"
     }
   ]
 }

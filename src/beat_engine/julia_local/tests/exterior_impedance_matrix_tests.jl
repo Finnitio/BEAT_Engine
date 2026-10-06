@@ -77,13 +77,17 @@ end
             # A conservative coefficient 4 budgets those asymptotic omissions;
             # separately budget faceting/quadrature with 4 times the area deficit.
             # This is an engineering bound, not a rigorous remainder estimate.
+            # The ~7% allowance catches sign, conjugation and copy-count errors,
+            # but not errors under ~5%: e^{-ikd} instead of e^{-ik(d-a)}, or a
+            # missing (1+ika), can pass. This is not a fine formula discriminator.
             approximation_budget = 4*(ka^2 + (a/d)^2)
             discretization_budget = 4*(1-sum(left.areas)/(4pi*a^2))
             tolerance = approximation_budget + discretization_budget
+            phase_tolerance_rad = 0.07 # absolute angle, about 4 degrees
             relative_error = abs(z[1,2]/reference-1)
             @info "Mutual pulsating-sphere oracle" convention faces=length(mesh.faces) relative_error tolerance approximation_budget discretization_budget reciprocity=meta["reciprocity_max_rel"] passivity=meta["passivity_min_eig"]
             @test relative_error < tolerance
-            @test abs(angle(z[1,2]/reference)) < tolerance
+            @test abs(angle(z[1,2]/reference)) < phase_tolerance_rad
             @test abs(conj(z[1,2])/reference-1) > 5tolerance
             @test meta["reciprocity_max_rel"] < 1e-10
             @test meta["passivity_min_eig"] > 0
@@ -96,6 +100,36 @@ end
         end
     end
     @test matrices[2] ≈ conj.(matrices[1]) rtol=1e-12
+end
+
+@testset "asymmetric receiver/source orientation and physical-copy counts" begin
+    # Two disjoint faces, different weights and deliberately unequal pressure
+    # columns. A transpose cannot pass even though its diagonal is unchanged.
+    mesh = BoundaryMesh(SVector{3,Float64}[(0,1,0),(1,1,0),(0,2,0),
+        (2,1,0),(3,1,0),(2,2,0)], [(1,2,3),(4,5,6)], [2,3])
+    receiver1 = (component_id="first",tags=[2],amplitudes=[2.])
+    receiver2 = (component_id="second",tags=[3],amplitudes=[3.])
+    source1_pressure = ComplexF64[1,1,1,4,4,4]
+    source2_pressure = ComplexF64[7+2im,7+2im,7+2im,5,5,5]
+    # Reversed solve order exercises the component-id mapping too.
+    excitations = [receiver2,receiver1]
+    pressures = [source2_pressure,source1_pressure]
+    components = [Dict("id"=>"first"),Dict("id"=>"second")]
+    for (symmetry,count) in ((:off,1),(:x,2),(:xy,4),(:ground,1))
+        z,meta = exterior_impedance_matrix(mesh,pressures,excitations,components,[],symmetry)
+        @test physical_radiator_count(symmetry) == count
+        @test z[1,2] == exterior_component_impedance(mesh,source2_pressure,receiver1,symmetry,Float64)
+        @test z[1,2] == count*(7+2im) # force on receiver 1 from source 2
+        @test z[2,1] == count*6
+        @test z[1,2] != z[2,1]
+        @test diag(z) == [exterior_component_impedance(mesh,source1_pressure,receiver1,symmetry,Float64),
+                         exterior_component_impedance(mesh,source2_pressure,receiver2,symmetry,Float64)]
+        @test z == count*ComplexF64[1 7+2im; 6 7.5]
+        @test meta["row_weights"] == [1.,1.]
+    end
+    # Pressure inputs stand for already solved columns including image pressure.
+    # Ground integrates one physical radiator regardless of those images.
+    @test exterior_component_force(mesh,source2_pressure,receiver1,0.5,Float64) == 0.5*(7+2im)
 end
 
 @testset "x images equal physical mirrored pair" begin
