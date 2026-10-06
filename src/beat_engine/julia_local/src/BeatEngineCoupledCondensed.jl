@@ -1712,7 +1712,10 @@ function _condensed_bem_assembly_plan(condensed_cache, prepared, ::Type{T}, quad
     end
     if plan.mode == :combined && !hasproperty(condensed_cache, :metal_combined_identity_store)
         # The identity scatter cache lives in the condensed cache; without one there is no owner.
-        plan = (mode=:operators, fallback_reason="the coupled cache has no combined identity store")
+        reason = "the coupled cache has no combined identity store"
+        lowercase(strip(get(ENV, "BLAB_METAL_COUPLED_BEM_ASSEMBLY", "auto"))) == "combined" &&
+            error("Combined Metal coupled assembly unavailable: $reason")
+        plan = (mode=:operators, fallback_reason=reason)
     end
     plan.mode == :combined || return plan, nothing
     # A sweep that assembles the BEM stage on a producer task reaches the store from two tasks.

@@ -260,7 +260,6 @@ function assemble_coupled_burton_miller_metal(
         end
         a = Metal.zeros(Complex{T}, prepared.p1.global_dof_count, prepared.p1.global_dof_count; storage=storage)
         c = Metal.zeros(Complex{T}, prepared.p1.global_dof_count, prepared.dp0.global_dof_count; storage=storage)
-        empty!(_metal_gather_stage_timing)
         _launch_metal_coupled_pair_kernels!(
             a, c, blocks, cache, signed_k, cache.vertex_offsets, cache.incident_elements, Int32(0),
             one(T), one(T), one(T), one(T), one(T), one(T),

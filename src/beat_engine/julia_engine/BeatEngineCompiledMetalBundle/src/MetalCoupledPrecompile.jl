@@ -285,19 +285,11 @@ function metal_coupled_types()
         gpu_backend=Symbol,
         assembly_mode=Symbol,
     ))
-    combined_host = _metal_namedtuple_type((;
-        a=Matrix{ComplexF32},
-        c=Matrix{ComplexF32},
-        on_gpu=Bool,
-        metal_backing=_metal_namedtuple_type((;
-            a=Metal.MtlArray{ComplexF32, 2, Metal.SharedStorage},
-            c=Metal.MtlArray{ComplexF32, 2, Metal.SharedStorage})),
-    ))
     combined_operators = _metal_namedtuple_type((; combined=combined_device))
     return (; cache_timings, transducer_operators, base, cache, quadrature_bundle, prepared,
         condensation_timings, condensation, mass_block, mass_operator, elimination,
         system_timings, system, solution, operators, device_operators, host_operators,
-        combined_identity, combined_device, combined_host, combined_operators)
+        combined_identity, combined_device, combined_operators)
 end
 
 function metal_coupled_host_signatures()
@@ -356,7 +348,8 @@ function metal_coupled_host_signatures()
     add(core.assemble_coupled_burton_miller_metal, (core.BoundaryMesh{Float32}, types.prepared, Float32);
         identity_cache=types.combined_identity)
     add(core.metal_host_coupled_burton_miller, (types.combined_device,))
-    add(core.release_metal_coupled_burton_miller!, (types.combined_host,))
+    # Production releases the device tuple (`_combine_condensed_bem_operators!`).
+    add(core.release_metal_coupled_burton_miller!, (types.combined_device,))
 
     # 107.1 / 197.7 / 131.6 ms, plus gather drivers. Only types are constructed.
     add(core.assemble_regular_galerkin_operators,
