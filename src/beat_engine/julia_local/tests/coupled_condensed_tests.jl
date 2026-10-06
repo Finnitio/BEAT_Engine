@@ -1808,4 +1808,9 @@ end
     @test withenv(() -> BeatEngineCoupledCondensed._host_zgemm_symbol(), "BLAB_COUPLED_HOST_ZGEMM" => "blas") == C_NULL
     @test_throws "BLAB_COUPLED_HOST_ZGEMM" withenv(() -> BeatEngineCoupledCondensed._host_zgemm_symbol(),
         "BLAB_COUPLED_HOST_ZGEMM" => "mkl")
+    # The diagnostic reports instead of throwing, so a solve without products still returns.
+    path(setting) = withenv(BeatEngineCoupledCondensed.host_zgemm_path, "BLAB_COUPLED_HOST_ZGEMM" => setting)
+    @test path("blas") == "blas"
+    @test startswith(path("mkl"), "unavailable: ") && occursin("BLAB_COUPLED_HOST_ZGEMM", path("mkl"))
+    @test path("auto") in ("blas", "accelerate")
 end

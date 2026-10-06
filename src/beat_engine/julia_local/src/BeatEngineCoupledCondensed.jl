@@ -856,8 +856,20 @@ function _host_zgemm_symbol()
     return symbol
 end
 
-"""`"accelerate"` or `"blas"`: the library `_host_zgemm` uses for ComplexF64 products here."""
-host_zgemm_path() = _host_zgemm_symbol() == C_NULL ? "blas" : "accelerate"
+"""
+`"accelerate"` or `"blas"`: the library `_host_zgemm` selects for ComplexF64 products (a product
+it cannot hand to BLAS still falls back to `A * B`). A diagnostic, so it never throws: an invalid
+`BLAB_COUPLED_HOST_ZGEMM`, or `accelerate` without the symbol, reports `"unavailable: <reason>"`
+even when the solve never reached a product.
+"""
+function host_zgemm_path()
+    try
+        return _host_zgemm_symbol() == C_NULL ? "blas" : "accelerate"
+    catch exception
+        exception isa ErrorException || rethrow()
+        return "unavailable: " * exception.msg
+    end
+end
 
 """
     _host_zgemm(A, B) -> Matrix{ComplexF64}
