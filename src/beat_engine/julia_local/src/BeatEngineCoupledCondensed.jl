@@ -164,8 +164,9 @@ _transducer_condensation_enabled(bem_backend::Symbol=:cpu) = _transducer_condens
 whatever `T` is, keeping the Schur block in double precision. Off by default on every backend
 (on Metal, `BLAB_COUPLED_DENSE_REFINEMENT` gives the same accuracy for less time).
 """
-_dense_float64_enabled(bem_backend::Symbol=:cpu) =
-    _coupled_switch("BLAB_COUPLED_DENSE_FLOAT64", bem_backend; metal_default=:off)
+_dense_float64_mode(bem_backend::Symbol=:cpu) =
+    _coupled_mode("BLAB_COUPLED_DENSE_FLOAT64", bem_backend; metal_default=:off)
+_dense_float64_enabled(bem_backend::Symbol=:cpu) = _dense_float64_mode(bem_backend) != :off
 
 """
 `BLAB_COUPLED_DENSE_REFINEMENT=1`: assemble the dense coupled system in `ComplexF64` as
@@ -174,8 +175,9 @@ solution by iterative refinement against the `ComplexF64` matrix (`RefinedDenseL
 stalls or does not reach the Float64 backward error within `DENSE_REFINEMENT_MAX_ITERATIONS` steps is redone with a
 `ComplexF64` LU and says why. Takes precedence over `BLAB_COUPLED_DENSE_FLOAT64` for the factorization.
 """
-_dense_refinement_enabled(bem_backend::Symbol=:cpu) =
-    _coupled_switch("BLAB_COUPLED_DENSE_REFINEMENT", bem_backend; cpu_default=:auto)
+_dense_refinement_mode(bem_backend::Symbol=:cpu) =
+    _coupled_mode("BLAB_COUPLED_DENSE_REFINEMENT", bem_backend; cpu_default=:auto)
+_dense_refinement_enabled(bem_backend::Symbol=:cpu) = _dense_refinement_mode(bem_backend) != :off
 _dense_double_assembly(bem_backend::Symbol=:cpu) =
     _dense_float64_enabled(bem_backend) || _dense_refinement_enabled(bem_backend)
 
@@ -335,7 +337,8 @@ Multi_region_SAWMOD at 20 Hz this puts a 5e-5 relative error in the transducer m
 and 1.2e-4 in every output, while the `A_II` factorization is already `Float64`. The matrices are
 sparse and cached, so the double-precision assembly costs little.
 """
-_fem_float64_enabled(bem_backend::Symbol=:cpu) = _coupled_switch("BLAB_COUPLED_FEM_FLOAT64", bem_backend)
+_fem_float64_mode(bem_backend::Symbol=:cpu) = _coupled_mode("BLAB_COUPLED_FEM_FLOAT64", bem_backend)
+_fem_float64_enabled(bem_backend::Symbol=:cpu) = _fem_float64_mode(bem_backend) != :off
 
 """
     _fem_system_float64(store, fem_mesh, prepared, frequency_hz, sound_speed, density)
@@ -539,7 +542,8 @@ condensation stage instead of after it. They depend only on the condensation and
 geometry, so on Metal they run while the BEM operators assemble; only the products with the
 BEM coupling block wait for the BEM stage.
 """
-_interface_mass_overlap_enabled(bem_backend::Symbol=:cpu) = _coupled_switch("BLAB_COUPLED_INTERFACE_MASS_OVERLAP", bem_backend)
+_interface_mass_overlap_mode(bem_backend::Symbol=:cpu) = _coupled_mode("BLAB_COUPLED_INTERFACE_MASS_OVERLAP", bem_backend)
+_interface_mass_overlap_enabled(bem_backend::Symbol=:cpu) = _interface_mass_overlap_mode(bem_backend) != :off
 
 """
 `BLAB_COUPLED_INTERFACE_BLOCKS=1`: keep the block structure of independent FEM components
@@ -563,8 +567,9 @@ output needs interior pressure. The caller decides (`reconstruct_interior` in
 `solve_condensed_coupled_excitations`); skipped interior pressures are `NaN` and the interior
 residual is reported as not evaluated.
 """
-_demand_reconstruction_enabled(bem_backend::Symbol=:cpu) =
-    _coupled_switch("BLAB_COUPLED_DEMAND_RECONSTRUCTION", bem_backend; cpu_default=:auto)
+_demand_reconstruction_mode(bem_backend::Symbol=:cpu) =
+    _coupled_mode("BLAB_COUPLED_DEMAND_RECONSTRUCTION", bem_backend; cpu_default=:auto)
+_demand_reconstruction_enabled(bem_backend::Symbol=:cpu) = _demand_reconstruction_mode(bem_backend) != :off
 
 _interface_mass_specialized(bem_backend::Symbol=:cpu) =
     _interface_mass_solver_selection(bem_backend) != :lu || _interface_mass_overlap_enabled(bem_backend) ||

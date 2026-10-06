@@ -194,6 +194,23 @@ end
     @test_throws "defaults" bundle.coupled_workload_environment(; mumps=false, defaults=:cuda)
 end
 
+@testset "coupled workload pins exactly what an unset environment selects" begin
+    bundle = CompiledWorkloadBundle
+    cc = bundle.BeatEngineCoupledCondensed
+    probes = (cc._transducer_condensation_enabled, cc._dense_float64_enabled, cc._dense_refinement_enabled,
+              cc._fem_float64_enabled, cc._interface_flux_elimination_enabled, cc._interface_mass_overlap_enabled,
+              cc._interface_blocks_enabled, cc._demand_reconstruction_enabled, cc._fem_solver_selection,
+              cc._interface_mass_solver_selection)
+    cleared = [name => nothing for name in keys(ENV) if startswith(name, "BLAB_COUPLED_")]
+    for defaults in (:metal, :cpu)
+        unset = withenv(() -> [probe(defaults) for probe in probes], cleared...)
+        # mumps=true keeps the resolved FEM solver instead of the host workload's UMFPACK override.
+        pinned = withenv(() -> [probe(defaults) for probe in probes],
+                         bundle.coupled_workload_environment(; mumps=true, defaults)...)
+        @test pinned == unset
+    end
+end
+
 @testset "tiny coupled workload with beat_cpu defaults solves (strict)" begin
     bundle = CompiledWorkloadBundle
     request = bundle.JSON.parse(bundle.JSON.json(bundle.coupled_workload_request(; tiny=true)))

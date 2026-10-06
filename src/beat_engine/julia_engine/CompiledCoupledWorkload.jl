@@ -131,17 +131,19 @@ end
 function coupled_workload_environment(; mumps::Bool, defaults::Symbol=:metal)
     defaults in (:metal, :cpu) || error("coupled workload defaults must be :metal or :cpu; got $defaults")
     cc = BeatEngineCoupledCondensed
+    # The solver's own per-switch resolvers, so the workload pins exactly what an unset
+    # environment selects on `defaults` (a bare `_coupled_mode` would miss per-backend defaults).
     modes = (
         "BLAB_COUPLED_TRANSDUCER_CONDENSATION" => cc._transducer_condensation_mode,
-        "BLAB_COUPLED_DENSE_FLOAT64" => b -> cc._coupled_mode("BLAB_COUPLED_DENSE_FLOAT64", b; metal_default=:off),
-        "BLAB_COUPLED_DENSE_REFINEMENT" => b -> cc._coupled_mode("BLAB_COUPLED_DENSE_REFINEMENT", b),
-        "BLAB_COUPLED_FEM_FLOAT64" => b -> cc._coupled_mode("BLAB_COUPLED_FEM_FLOAT64", b),
+        "BLAB_COUPLED_DENSE_FLOAT64" => cc._dense_float64_mode,
+        "BLAB_COUPLED_DENSE_REFINEMENT" => cc._dense_refinement_mode,
+        "BLAB_COUPLED_FEM_FLOAT64" => cc._fem_float64_mode,
         "BLAB_COUPLED_INTERFACE_PRESSURE_ELIMINATION" => cc._interface_pressure_elimination_mode,
         "BLAB_COUPLED_INTERFACE_FLUX_ELIMINATION" => cc._interface_flux_elimination_mode,
         "BLAB_COUPLED_INTERFACE_MASS_SOLVER" => cc._interface_mass_solver_selection,
-        "BLAB_COUPLED_INTERFACE_MASS_OVERLAP" => b -> cc._coupled_mode("BLAB_COUPLED_INTERFACE_MASS_OVERLAP", b),
+        "BLAB_COUPLED_INTERFACE_MASS_OVERLAP" => cc._interface_mass_overlap_mode,
         "BLAB_COUPLED_INTERFACE_BLOCKS" => cc._interface_blocks_mode,
-        "BLAB_COUPLED_DEMAND_RECONSTRUCTION" => b -> cc._coupled_mode("BLAB_COUPLED_DEMAND_RECONSTRUCTION", b),
+        "BLAB_COUPLED_DEMAND_RECONSTRUCTION" => cc._demand_reconstruction_mode,
         "BLAB_COUPLED_FEM_SOLVER" => cc._fem_solver_selection,
     )
     # Every coupled and MUMPS override from the installing environment is cleared, so the
