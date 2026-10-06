@@ -196,17 +196,20 @@ policy, projection signs, empty maps, gather indexing and output ownership tests
 a functional GPU in `tests/metal_host_tests.jl`.
 
 Measured on an M1 Max (eight Julia threads), Multi_region_SAWMOD, 40 frequencies
-from 20 Hz to 20 kHz, warm worker, sequential sweep, interleaved runs
-(operators / combined / combined / operators; the first pair ran beside another
-machine load and is listed for completeness):
+from 20 Hz to 20 kHz, warm worker, MUMPS FEM solver, with the coupled sweep
+pipeline and its automatic on/off decision. Three runs per configuration,
+interleaved (operators / combined / combined / operators / operators / combined),
+on an otherwise idle machine:
 
 | | Four operators | Combined |
 | --- | ---: | ---: |
-| Sweep (clean pair) | 65.5 s | **51.8 s** |
-| Sweep (loaded pair) | 75.1 s | 58.5 s |
-| `bem_operator_s` (GPU stage) | 0.81 s | 0.32 s |
-| `bem_matrix_s` (host projection) | 0.09 s | 0.15-0.16 s |
-| Peak worker memory | 4.9-5.0 GB | 4.3 GB |
+| Sweep, median (range) | 52.6 s (51.8-53.1) | **42.0 s** (41.5-42.0) |
+| Peak worker memory | 4.8-5.2 GB | 3.8-3.9 GB |
+
+The sweep pipeline assembles the four-operator BEM stage one frequency ahead;
+the combined stage (`bem_operator_s` 0.29 s against 0.82 s for the four
+operators on the same tree with the pipeline off) is short enough that the
+pipeline decides to stay off.
 
 `validate_metal_coupled_combined.jl` passes for `off`, `x` and `xy` with both
 phasor conventions: A and C agree with the four-operator path to about 3e-7
