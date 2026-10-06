@@ -35,6 +35,7 @@ using ..BeatEngineCore
 using ..BeatEngineCoupled
 
 include(joinpath(@__DIR__, "BeatEngineCondensedAssembly.jl"))
+include(joinpath(@__DIR__, "BeatEngineMetalCoupledHost.jl"))
 include(joinpath(@__DIR__, "BeatEngineMumps.jl"))
 using .BeatEngineMumps
 
@@ -1541,6 +1542,10 @@ function prepare_condensed_coupled_cache(
     return (
         base=base,
         quadrature_bundles=bundles,
+        metal_combined_identity_store=Dict{Int,Any}(),
+        # A sweep that assembles the BEM stage on a producer task (the coupled sweep pipeline)
+        # reaches this store from two tasks.
+        metal_combined_identity_lock=ReentrantLock(),
         base_quadrature_order=quadrature_order,
         singular_order=singular_order,
         timings=timings,
@@ -1554,6 +1559,14 @@ function prepare_condensed_coupled_cache(
 end
 
 function release_condensed_coupled_cache!(cache)
+    if hasproperty(cache, :metal_combined_identity_store)
+        lock(cache.metal_combined_identity_lock) do
+            for identity in values(cache.metal_combined_identity_store)
+                BeatEngineCore.release_metal_coupled_identity_cache!(identity)
+            end
+            empty!(cache.metal_combined_identity_store)
+        end
+    end
     # Extra bundles (orders other than the base) own their own device caches
     # under Metal; host bundles are reclaimed by the collector. The base cache
     # still owns whatever `prepare_coupled_cache` allocated.
@@ -1714,6 +1727,31 @@ function build_condensed_coupled_system(
     prepared.retained_fem_vertices == retained_fem_vertices ||
         error("Coupled cache retained FEM vertices do not match the current moving surfaces.")
 
+    assembly_plan = if prepared.bem_backend == :metal
+        requested = get(ENV, "BLAB_METAL_COUPLED_BEM_ASSEMBLY", "auto")
+        # Operators bypass support probes, preserving the diagnostic/reference path.
+        reason = lowercase(strip(requested)) == "operators" ? nothing :
+                 BeatEngineCore.metal_coupled_combined_support_reason(prepared, T)
+        resolve_metal_coupled_bem_assembly(requested, reason)
+    else
+        (mode=:operators, fallback_reason=nothing)
+    end
+    if assembly_plan.mode == :combined && !hasproperty(condensed_cache, :metal_combined_identity_store)
+        # The identity scatter cache lives in the condensed cache; without one there is no owner.
+        assembly_plan = (mode=:operators, fallback_reason="the coupled cache has no combined identity store")
+    end
+    assembly_plan.fallback_reason === nothing || push!(optimization_fallbacks,
+        "combined Metal BEM assembly not used: " * assembly_plan.fallback_reason)
+    combined_identity = if assembly_plan.mode == :combined && hasproperty(condensed_cache, :metal_combined_identity_store)
+        lock(condensed_cache.metal_combined_identity_lock) do
+            get!(condensed_cache.metal_combined_identity_store, selected_quadrature_order) do
+                BeatEngineCore.build_metal_coupled_identity_cache(prepared, T)
+            end
+        end
+    else
+        nothing
+    end
+
     omega = T(2pi) * frequency_hz
     wavenumber = omega / sound_speed
     fem_system = assemble_fem_dynamic_stiffness(
@@ -1850,7 +1888,13 @@ function build_condensed_coupled_system(
     # This solver's own fork of the CPU regular assembly, so it can be optimised without
     # touching the shared path every other backend runs through. Behaviourally identical to
     # `assemble_regular_galerkin_operators(...; backend=:cpu)`, pinned by an equivalence test.
-    operators = if prepared.bem_backend == :metal
+    combined = nothing
+    operators = if assembly_plan.mode == :combined
+        combined = BeatEngineCore.assemble_coupled_burton_miller_metal(
+            bem_mesh, prepared, wavenumber; identity_cache=combined_identity,
+        )
+        nothing
+    elseif prepared.bem_backend == :metal
         # Metal assembles the four operators on the GPU; the condensed algebra
         # below is CPU-only, so bring them down and free the device copies.
         device_operators = assemble_regular_galerkin_operators(
@@ -1888,21 +1932,36 @@ function build_condensed_coupled_system(
     bem_operator_s = (time_ns() - bem_operator_started) / 1.0e9
 
     bem_matrix_started = time_ns()
-    bem_lhs, bem_rhs_operator = burton_miller_neumann_matrices(
-        operators,
-        prepared.identity_p1_p1,
-        prepared.identity_p1_dp0,
-        wavenumber,
-    )
-    # `operators` is dead from here on and the matrices above are freshly
-    # allocated host arrays, so free the Metal buffers now rather than leaking
-    # one operator set per condensed frequency.
-    prepared.bem_backend == :metal && release_operator_storage!(operators)
-    bem_interface_block = -(bem_rhs_operator * Complex{T}.(interface_operators.bem_flux))
-    bem_motion_block = transducer_count == 0 ? nothing : -(bem_rhs_operator * bem_motion_flux)
-    bem_prescribed_rhs = prescribed_bem_count == 0 ?
-                         zeros(Complex{T}, length(bem_mesh.vertices), 0) :
-                         Complex{T}.(bem_rhs_operator * bem_prescribed_neumann)
+    if assembly_plan.mode == :combined
+        try
+            host = BeatEngineCore.metal_host_coupled_burton_miller(combined)
+            blocks = project_metal_coupled_host_blocks(
+                host, interface_operators.bem_flux, bem_motion_flux, bem_prescribed_neumann,
+            )
+            bem_lhs = blocks.bem_lhs
+            bem_interface_block = blocks.bem_interface_block
+            bem_motion_block = blocks.bem_motion_block
+            bem_prescribed_rhs = blocks.bem_prescribed_rhs
+        finally
+            BeatEngineCore.release_metal_coupled_burton_miller!(combined)
+        end
+    else
+        bem_lhs, bem_rhs_operator = burton_miller_neumann_matrices(
+            operators,
+            prepared.identity_p1_p1,
+            prepared.identity_p1_dp0,
+            wavenumber,
+        )
+        # `operators` is dead from here on and the matrices above are freshly
+        # allocated host arrays, so free the Metal buffers now rather than leaking
+        # one operator set per condensed frequency.
+        prepared.bem_backend == :metal && release_operator_storage!(operators)
+        bem_interface_block = -(bem_rhs_operator * Complex{T}.(interface_operators.bem_flux))
+        bem_motion_block = transducer_count == 0 ? nothing : -(bem_rhs_operator * bem_motion_flux)
+        bem_prescribed_rhs = prescribed_bem_count == 0 ?
+                             zeros(Complex{T}, length(bem_mesh.vertices), 0) :
+                             Complex{T}.(bem_rhs_operator * bem_prescribed_neumann)
+    end
     # Replay the frozen operating flux without changing the coupled state.
     # Preserve host matrices before accelerator assembly storage is released.
     interface_radiation_replay = retain_interface_radiation ? (
@@ -2191,6 +2250,8 @@ function build_condensed_coupled_system(
         prescribed_bem_rhs=bem_prescribed_rhs,
         prescribed_bem_neumann=bem_prescribed_neumann,
         bem_backend=prepared.bem_backend,
+        coupled_bem_assembly=assembly_plan.mode,
+        coupled_bem_assembly_fallback_reason=assembly_plan.fallback_reason,
         linear_backend=:cpu,
         symmetry_mode=prepared.symmetry_mode,
         cache=condensed_cache,

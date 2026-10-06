@@ -88,3 +88,19 @@ coupled cache reuse across frequencies, and full-diagnostic fallback. The tests
 preserve complex pressure/flux and independent source columns. Run with the
 CUDA Julia project and a functional device; an unavailable-device skip does not
 qualify this architecture.
+
+
+The CPU-only combined Metal policy/projection tests are
+`metal_coupled_host_tests.jl` (also included by `runtests.jl` and
+`metal_host_tests.jl`). They load only standard libraries, with no GPU:
+
+```sh
+julia --threads=1 --startup-file=no src/beat_engine/julia_local/tests/metal_coupled_host_tests.jl
+```
+
+Metal combined A/C qualification is
+`scripts/validate_metal_coupled_combined.jl` under the `julia_metal` project.
+It compares matrix/projection and full condensed coupled results for `off/x/xy`
+and both phasors, with explicit matrix and solution tolerances. Run accelerator
+qualification, the reference gate and benchmark jobs through the job broker
+when a machine brief requires it.
