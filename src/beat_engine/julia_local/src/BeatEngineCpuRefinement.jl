@@ -61,6 +61,18 @@ function beat_refine_cpu_lu(matrix::AbstractMatrix{ComplexF32}, rhs::AbstractVec
     solution = ComplexF32.(x)
     returned_errors = residuals(ComplexF64.(solution))
     output = rhs isa AbstractMatrix ? solution : vec(solution)
-    return output, (;steps,status,working_relative_residuals=errors,
+    working_status = any(!isfinite, errors) ? :nonfinite : status
+    # Only call the returned pressure converged when its rounded values meet
+    # the requested tolerance. Float64 working convergence can be lost here.
+    status = if any(!isfinite, returned_errors)
+        :nonfinite
+    elseif all(<=(rtol), returned_errors)
+        :converged
+    elseif working_status === :converged
+        :rounding_limited
+    else
+        working_status
+    end
+    return output, (;steps,status,working_status,rtol,working_relative_residuals=errors,
         returned_relative_residuals=returned_errors,history)
 end

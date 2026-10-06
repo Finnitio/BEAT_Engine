@@ -1173,11 +1173,23 @@ function beat_dense_solve_diagnostics(report)
         "dense_solve_model_lu_s" => report.plan.lu_model_seconds,
         "dense_solve_model_gmres_s" => report.plan.gmres_model_seconds,
     )
-    if hasproperty(report, :refinement)
-        diagnostics["dense_solve_refinement_steps"] = report.refinement.steps
-        diagnostics["dense_solve_refinement_status"] = String(report.refinement.status)
-        diagnostics["dense_solve_refinement_working_residuals"] = report.refinement.working_relative_residuals
-        diagnostics["dense_solve_refinement_returned_residuals"] = report.refinement.returned_relative_residuals
+    merge!(diagnostics, beat_dense_refinement_diagnostics(report))
+    return diagnostics
+end
+
+# The legacy source driver keeps its existing dense-solve wire types. Share
+# only the opt-in additions with it so the disabled result stays identical.
+function beat_dense_refinement_diagnostics(report)
+    diagnostics = Dict{String,Any}()
+    if report !== nothing && hasproperty(report, :refinement)
+        refinement = report.refinement
+        json_residuals(values) = [isfinite(value) ? value : nothing for value in values]
+        diagnostics["dense_solve_refinement_steps"] = refinement.steps
+        diagnostics["dense_solve_refinement_status"] = String(refinement.status)
+        diagnostics["dense_solve_refinement_working_status"] = String(refinement.working_status)
+        diagnostics["dense_solve_refinement_tolerance"] = refinement.rtol
+        diagnostics["dense_solve_refinement_working_residuals"] = json_residuals(refinement.working_relative_residuals)
+        diagnostics["dense_solve_refinement_returned_residuals"] = json_residuals(refinement.returned_relative_residuals)
         diagnostics["dense_solve_refinement_operator"] = "rounded_float32"
     end
     return diagnostics

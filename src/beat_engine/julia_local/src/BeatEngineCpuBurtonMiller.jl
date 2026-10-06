@@ -484,7 +484,8 @@ selection and results are unchanged. ComplexF32 LU solves can opt into 1–3
 Float64-residual corrections with `refinement_steps` or
 `BLAB_BEAT_CPU_LU_REFINEMENT_STEPS` (default 0). This refines the rounded
 operator, not its assembly. Float64 solves retain their ordinary path.
-The report distinguishes residual convergence from the correction limit.
+The report's status describes the returned Float32 pressure; working_status
+describes convergence before rounding, against refinement_rtol.
 """
 function solve_burton_miller_neumann_system_cpu_with_report(system;
         method::Symbol=beat_dense_solve_method(),
@@ -495,7 +496,8 @@ function solve_burton_miller_neumann_system_cpu_with_report(system;
     eltype(system.matrix) === ComplexF32 || throw(ArgumentError("CPU LU refinement requires ComplexF32"))
     plan = beat_dense_solve_plan(size(system.matrix, 1), size(system.rhs, 2); method=method)
     plan.method === :lu || throw(ArgumentError("CPU LU refinement requires an LU solve; select method=:lu"))
-    seconds = @elapsed pressure, refinement = beat_refine_cpu_lu(system.matrix, system.rhs;
+    rhs = system.rhs isa AbstractMatrix ? system.rhs : reshape(system.rhs, :, 1)
+    seconds = @elapsed pressure, refinement = beat_refine_cpu_lu(system.matrix, rhs;
         max_steps=refinement_steps, rtol=refinement_rtol)
     return pressure, (
         plan=plan, method=:lu, fell_back=false, fallback_reason=nothing,
