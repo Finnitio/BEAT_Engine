@@ -166,24 +166,12 @@ fields, using the same lookup and field tuples. It requires no GPU or Metal
 package and performs no solves or kernel launches.
 
 `field_output_points_tests.jl` checks the compiled driver's request-level point
-parser without a solve or accelerator. It checks inferred Float32/Float64 array
-types, bitwise equality with the original conversion, output IDs and point order,
-and unchanged errors for empty, non-finite and wrong-length points. Both
-`reference_tests.jl` and `runtests.jl` include it. From the repository root:
+parser's inferred types, exact values and shape errors without a solve or
+accelerator. It reuses the compiled bundle in `runtests.jl` and can run standalone:
 
 ```sh
 julia --threads=2 --startup-file=no --project=src/beat_engine/julia_local src/beat_engine/julia_local/tests/field_output_points_tests.jl
-julia --threads=2 --startup-file=no --project=src/beat_engine/julia_local src/beat_engine/julia_local/tests/reference_tests.jl
-julia --threads=2 --startup-file=no --project=src/beat_engine/julia_local src/beat_engine/julia_local/tests/runtests.jl
 ```
-
-Existing exterior field coverage includes `axial_source_tests.jl`,
-`analytical_exterior_tests.jl` and `phasor_tests.jl` in the reference suite.
-`runtests.jl` also exercises fields directly and includes
-`compiled_workload_tests.jl` and `exterior_transducer_tests.jl` for compiled
-exterior outputs. Coupled field comparisons in `coupled_solver_tests.jl` are
-also included by the reference suite and require their accelerator hardware
-gates.
 
 Compiled exterior CPU `direct_system` now reaches the existing fused assembler,
 regular/singular SIMD kernels and transposed scatter, with the existing CPU LU

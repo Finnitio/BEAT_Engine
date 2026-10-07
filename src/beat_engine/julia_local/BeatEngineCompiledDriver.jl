@@ -943,26 +943,19 @@ end
 
 release_exterior_metal_system(produced) = release_metal_burton_miller_system!(produced.system)
 
-function validate_interface_observation_points(points)
-    (!isempty(points) && all(point -> point isa AbstractVector && length(point) == 3 &&
-        all(value -> value isa Real && !(value isa Bool) && isfinite(value), point), points)) ||
-        error("Interface radiation requires finite observation points with shape (point, 3).")
-    return nothing
-end
-
 # Specialize on the requested precision before converting JSON's Vector{Any}.
 # Retain the original broadcast and SVector construction so rounding and shape
-# errors are unchanged. Request validation already checks finite JSON values;
-# use its path and message here too when this parser is called independently.
+# errors are unchanged.
 function parse_field_output_points(outputs, ::Type{T}) where {T<:AbstractFloat}
     points_by_output = Dict{String,Vector{SVector{3,T}}}()
-    for (output_index, output) in enumerate(outputs)
+    for output in outputs
         quantity = String(output["quantity"])
         quantity in ("exterior_pressure", "interface_radiated_pressure") || continue
         raw_points = get(get(output, "options", Dict{String,Any}()), "points_m", Any[])
-        BeatEngineContract.finite_json(raw_points, "request.outputs[$(output_index - 1)].options.points_m")
         if quantity == "interface_radiated_pressure"
-            validate_interface_observation_points(raw_points)
+            (!isempty(raw_points) && all(point -> point isa AbstractVector && length(point) == 3 &&
+                all(value -> value isa Real && !(value isa Bool) && isfinite(value), point), raw_points)) ||
+                error("Interface radiation requires finite observation points with shape (point, 3).")
         else
             isempty(raw_points) && error("exterior_pressure output requires options.points_m.")
         end
@@ -2641,7 +2634,9 @@ function solve_request_impl(request; event_mode=false)
             (!isempty(interfaces) && !isempty(bounded_regions) && !isempty(unbounded_regions)) ||
                 error("Interface radiation requires a coupled system with FEM-BEM interfaces.")
             points = get(get(output, "options", Dict{String,Any}()), "points_m", Any[])
-            validate_interface_observation_points(points)
+            (!isempty(points) && all(point -> point isa AbstractVector && length(point) == 3 &&
+                all(value -> value isa Real && !(value isa Bool) && isfinite(value), point), points)) ||
+                error("Interface radiation requires finite observation points with shape (point, 3).")
         end
     end
     isempty(unbounded_regions) && return solve_interior_request(

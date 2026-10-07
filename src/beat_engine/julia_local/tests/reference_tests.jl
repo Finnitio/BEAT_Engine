@@ -24,7 +24,6 @@ include(joinpath(@__DIR__, "coupled_solver_tests.jl"))
 include(joinpath(@__DIR__, "coupled_condensed_tests.jl"))
 include(joinpath(@__DIR__, "phasor_tests.jl"))
 include(joinpath(@__DIR__, "axial_source_tests.jl"))
-include(joinpath(@__DIR__, "field_output_points_tests.jl"))
 
 include(joinpath(@__DIR__, "interface_velocity_tests.jl"))
 include(joinpath(@__DIR__, "deploy_mixed_rom_tests.jl"))
