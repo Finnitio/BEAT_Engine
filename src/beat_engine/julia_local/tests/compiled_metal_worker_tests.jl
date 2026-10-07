@@ -1,6 +1,22 @@
 using Test, JSON
 import BeatEngineCompiledMetalBundle
 
+# First, before anything in this process can look it up: the package image must not carry the
+# precompile workload's "already looked up" flag without its (nulled) pointer.
+@testset "Accelerate zgemm is looked up afresh in a new worker" begin
+    cc = BeatEngineCompiledMetalBundle.BeatEngineCoupledCondensed
+    @test !cc._ACCELERATE_ZGEMM_LOOKED_UP[]
+    @test cc._ACCELERATE_ZGEMM[] == C_NULL
+    if Sys.isapple() && Sys.ARCH === :aarch64
+        withenv("BLAB_COUPLED_HOST_ZGEMM" => nothing) do
+            @test cc.host_zgemm_path() == "accelerate"
+        end
+        withenv("BLAB_COUPLED_HOST_ZGEMM" => "accelerate") do
+            @test cc._host_zgemm_symbol() != C_NULL
+        end
+    end
+end
+
 @testset "Metal runtime inventory follows Channel's task wrapper" begin
     wrapper = BeatEngineCompiledMetalBundle.metal_channel_task_wrapper_type()
     @test fieldnames(Base.unwrap_unionall(wrapper)) == (:func, :chnl)
@@ -118,5 +134,6 @@ end
     mumps = bundle.BeatEngineCoupledCondensed.BeatEngineMumps
     @test mumps.LIBRARY[] === nothing
     @test isempty(mumps.LIVE_SOLVERS)
+    @test !bundle.BeatEngineCoupledCondensed._ACCELERATE_ZGEMM_LOOKED_UP[]
     @test !mumps.ATEXIT_REGISTERED[]
 end

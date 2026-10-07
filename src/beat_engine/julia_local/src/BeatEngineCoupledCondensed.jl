@@ -35,6 +35,7 @@ using ..BeatEngineCore
 using ..BeatEngineCoupled
 
 include(joinpath(@__DIR__, "BeatEngineCondensedAssembly.jl"))
+include(joinpath(@__DIR__, "BeatEngineMetalCoupledHost.jl"))
 include(joinpath(@__DIR__, "BeatEngineMumps.jl"))
 using .BeatEngineMumps
 
@@ -800,6 +801,91 @@ function _flux_mass_presolve(operator, schur::AbstractMatrix, motion_columns::Ab
     return (schur_blocks=schur_blocks, motion_solution=motion_solution, split=split)
 end
 
+const _ACCELERATE_ZGEMM = Ref{Ptr{Cvoid}}(C_NULL)
+const _ACCELERATE_ZGEMM_LOOKED_UP = Ref(false)
+const _ACCELERATE_ZGEMM_LOCK = ReentrantLock()
+
+# Apple Accelerate's ILP64 "new LAPACK" `zgemm` (macOS 13.3+), or C_NULL. The legacy unsuffixed
+# entry points are never used: they are not safe under concurrent calls. The lookup and its result
+# are guarded by one lock, so concurrent first callers see either nothing yet or the final pointer.
+function _accelerate_zgemm()
+    lock(_ACCELERATE_ZGEMM_LOCK) do
+        if !_ACCELERATE_ZGEMM_LOOKED_UP[]
+            if Sys.isapple() && Sys.ARCH === :aarch64
+                handle = Base.Libc.Libdl.dlopen("/System/Library/Frameworks/Accelerate.framework/Accelerate";
+                    throw_error=false)
+                if handle !== nothing
+                    symbol = Base.Libc.Libdl.dlsym(handle, "zgemm\$NEWLAPACK\$ILP64"; throw_error=false)
+                    _ACCELERATE_ZGEMM[] = symbol === nothing ? C_NULL : symbol
+                end
+            end
+            _ACCELERATE_ZGEMM_LOOKED_UP[] = true
+        end
+        return _ACCELERATE_ZGEMM[]
+    end
+end
+
+# A package image stores the pointer as C_NULL but keeps the flag, so a fresh process would never
+# look it up again. Reset both in every new process and after a precompile workload.
+function reset_accelerate_zgemm!()
+    lock(_ACCELERATE_ZGEMM_LOCK) do
+        _ACCELERATE_ZGEMM[] = C_NULL
+        _ACCELERATE_ZGEMM_LOOKED_UP[] = false
+    end
+    return nothing
+end
+
+__init__() = reset_accelerate_zgemm!()
+
+"""
+`BLAB_COUPLED_HOST_ZGEMM` (`auto`, `accelerate`, `blas`): the library for the large ComplexF64
+interface products of the flux elimination (`B_q W`, `B_q V`). `auto` uses Apple Accelerate's
+ILP64 `zgemm` on Apple Silicon when its new-LAPACK entry point exists, and Julia's BLAS
+elsewhere. On an M1 Max, at the products' shapes (about 3,100 x k by k x k, k = 300-1,200),
+Accelerate measured 2.0-2.5x faster than OpenBLAS with eight threads, agreeing to 1e-15
+relative. Only these products change library; Julia's BLAS is untouched.
+"""
+function _host_zgemm_symbol()
+    raw = lowercase(strip(get(ENV, "BLAB_COUPLED_HOST_ZGEMM", "auto")))
+    raw in ("auto", "accelerate", "blas") ||
+        error("Unsupported BLAB_COUPLED_HOST_ZGEMM value: $raw. Expected auto, accelerate, or blas.")
+    raw == "blas" && return C_NULL
+    symbol = _accelerate_zgemm()
+    raw == "accelerate" && symbol == C_NULL &&
+        error("BLAB_COUPLED_HOST_ZGEMM=accelerate, but Accelerate's new-LAPACK zgemm is not available.")
+    return symbol
+end
+
+"""`"accelerate"` or `"blas"`: the library `_host_zgemm` uses for ComplexF64 products here."""
+host_zgemm_path() = _host_zgemm_symbol() == C_NULL ? "blas" : "accelerate"
+
+"""
+    _host_zgemm(A, B) -> Matrix{ComplexF64}
+
+`A * B` for ComplexF64 operands with unit row stride and a column stride at least the row count
+(so it is a valid BLAS leading dimension), through `_host_zgemm_symbol()`. Anything else (another
+element type, a non-unit row stride, a reversed or overlapping column stride) takes Julia's `*`.
+"""
+function _host_zgemm(A::AbstractMatrix, B::AbstractMatrix)
+    symbol = _host_zgemm_symbol()
+    (symbol == C_NULL || eltype(A) !== ComplexF64 || eltype(B) !== ComplexF64 ||
+     !(A isa StridedMatrix) || !(B isa StridedMatrix) || stride(A, 1) != 1 || stride(B, 1) != 1 ||
+     stride(A, 2) < max(1, size(A, 1)) || stride(B, 2) < max(1, size(B, 1))) &&
+        return A * B
+    m, k = size(A)
+    k == size(B, 1) || throw(DimensionMismatch("A has $k columns, B has $(size(B, 1)) rows"))
+    n = size(B, 2)
+    C = Matrix{ComplexF64}(undef, m, n)
+    (m == 0 || n == 0) && return C
+    k == 0 && return fill!(C, zero(ComplexF64))
+    GC.@preserve A B C ccall(symbol, Cvoid,
+        (Ref{UInt8}, Ref{UInt8}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{ComplexF64}, Ptr{ComplexF64},
+         Ref{Int64}, Ptr{ComplexF64}, Ref{Int64}, Ref{ComplexF64}, Ptr{ComplexF64}, Ref{Int64}),
+        UInt8('N'), UInt8('N'), m, n, k, one(ComplexF64), pointer(A), stride(A, 2),
+        pointer(B), stride(B, 2), zero(ComplexF64), pointer(C), max(1, m))
+    return C
+end
+
 """
     _flux_block_products!(coupled, rows, columns_of_gamma, operator, schur_blocks, interface_block, split)
 
@@ -812,7 +898,7 @@ function _flux_block_products!(coupled, rows, columns_of_gamma, operator, schur_
         coupling_columns = block.contiguous ?
                            view(interface_block, :, first(block.dofs):last(block.dofs)) :
                            interface_block[:, block.dofs]
-        block_coupling = _split_timed!(() -> coupling_columns * schur_block, split, :product)
+        block_coupling = _split_timed!(() -> _host_zgemm(coupling_columns, schur_block), split, :product)
         _split_timed!(split, :scatter) do
             for (local_column, column) in enumerate(block.rows)
                 @views coupled[rows, columns_of_gamma[column]] .+= block_coupling[:, local_column]
@@ -1544,6 +1630,10 @@ function prepare_condensed_coupled_cache(
     return (
         base=base,
         quadrature_bundles=bundles,
+        metal_combined_identity_store=Dict{Int,Any}(),
+        # A sweep that assembles the BEM stage on a producer task (the coupled sweep pipeline)
+        # reaches this store from two tasks.
+        metal_combined_identity_lock=ReentrantLock(),
         base_quadrature_order=quadrature_order,
         singular_order=singular_order,
         timings=timings,
@@ -1557,6 +1647,14 @@ function prepare_condensed_coupled_cache(
 end
 
 function release_condensed_coupled_cache!(cache)
+    if hasproperty(cache, :metal_combined_identity_store)
+        lock(cache.metal_combined_identity_lock) do
+            for identity in values(cache.metal_combined_identity_store)
+                BeatEngineCore.release_metal_coupled_identity_cache!(identity)
+            end
+            empty!(cache.metal_combined_identity_store)
+        end
+    end
     # Extra bundles (orders other than the base) own their own device caches
     # under Metal; host bundles are reclaimed by the collector. The base cache
     # still owns whatever `prepare_coupled_cache` allocated.
@@ -1610,12 +1708,52 @@ function _stage_overlap_enabled(bem_backend::Symbol)
 end
 
 """
-    _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+    _condensed_bem_assembly_plan(condensed_cache, prepared, T, quadrature_order) -> (plan, identity)
+
+`BLAB_METAL_COUPLED_BEM_ASSEMBLY` for one condensed frequency: `plan.mode` is `:combined` (Metal
+assembles A and C directly; `identity` is the cached identity scatter for this quadrature order) or
+`:operators` (the four operators; `identity` is `nothing`), with `plan.fallback_reason` when `auto`
+could not use the combined path. The build and the sweep pipeline's producer resolve it alike.
+"""
+function _condensed_bem_assembly_plan(condensed_cache, prepared, ::Type{T}, quadrature_order::Int) where {T}
+    plan = if prepared.bem_backend == :metal
+        requested = get(ENV, "BLAB_METAL_COUPLED_BEM_ASSEMBLY", "auto")
+        # Operators bypass support probes, preserving the diagnostic/reference path.
+        reason = lowercase(strip(requested)) == "operators" ? nothing :
+                 BeatEngineCore.metal_coupled_combined_support_reason(prepared, T)
+        resolve_metal_coupled_bem_assembly(requested, reason)
+    else
+        (mode=:operators, fallback_reason=nothing)
+    end
+    if plan.mode == :combined && !hasproperty(condensed_cache, :metal_combined_identity_store)
+        # The identity scatter cache lives in the condensed cache; without one there is no owner.
+        reason = "the coupled cache has no combined identity store"
+        lowercase(strip(get(ENV, "BLAB_METAL_COUPLED_BEM_ASSEMBLY", "auto"))) == "combined" &&
+            error("Combined Metal coupled assembly unavailable: $reason")
+        plan = (mode=:operators, fallback_reason=reason)
+    end
+    plan.mode == :combined || return plan, nothing
+    # A sweep that assembles the BEM stage on a producer task reaches the store from two tasks.
+    identity = lock(condensed_cache.metal_combined_identity_lock) do
+        get!(condensed_cache.metal_combined_identity_store, quadrature_order) do
+            BeatEngineCore.build_metal_coupled_identity_cache(prepared, T)
+        end
+    end
+    return plan, identity
+end
+
+"""
+    _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order; combined_identity=nothing)
 
 The BEM stage of one condensed frequency: the four regular Galerkin operators as host matrices.
 Metal assembles them on the GPU; the CPU uses this solver's own fork of the regular assembly.
+With a `combined_identity` (`_condensed_bem_assembly_plan`), Metal instead assembles the
+Burton-Miller A and C directly, returned as `(combined=...,)` device storage.
 """
-function _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order::Int)
+function _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order::Int; combined_identity=nothing)
+    isnothing(combined_identity) || return (combined=BeatEngineCore.assemble_coupled_burton_miller_metal(
+        bem_mesh, prepared, wavenumber; identity_cache=combined_identity,
+    ),)
     return if prepared.bem_backend == :metal
         # Metal assembles the four operators on the GPU; the condensed algebra
         # below is CPU-only, so bring them down and free the device copies.
@@ -1661,6 +1799,18 @@ The Burton-Miller combination of one frequency's four operators and the interfac
 `-C Q`, as fresh host arrays. Frees the operators' Metal buffers: nothing reads them afterwards.
 """
 function _combine_condensed_bem_operators!(operators, prepared, wavenumber)
+    if hasproperty(operators, :combined)
+        # A = 0.5Mpp - D + alpha H and C = S + alpha (adjD + 0.5Mpq); the operator path's
+        # right-hand-side operator is -C. Owned host copies, then the device storage is freed.
+        try
+            host = BeatEngineCore.metal_host_coupled_burton_miller(operators.combined)
+            bem_flux = prepared.interface_operators.bem_flux
+            size(host.c, 2) == size(bem_flux, 1) || error("Metal combined flux map must have one row per DP0 dof.")
+            return copy(host.a), -host.c, host.c * Complex{typeof(wavenumber)}.(bem_flux)
+        finally
+            BeatEngineCore.release_metal_coupled_burton_miller!(operators.combined)
+        end
+    end
     bem_lhs, bem_rhs_operator = burton_miller_neumann_matrices(
         operators,
         prepared.identity_p1_p1,
@@ -1702,7 +1852,10 @@ function assemble_condensed_bem_operators(
         error("Condensed coupled cache singular order does not match the requested singular order.")
     prepared = merge(cache.base, bundle)
     wavenumber = (T(2pi) * frequency_hz) / sound_speed
-    operators = _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+    _, combined_identity = _condensed_bem_assembly_plan(cache, prepared, T, order)
+    operators = _assemble_condensed_bem_operators(
+        bem_mesh, prepared, wavenumber, singular_order; combined_identity=combined_identity,
+    )
     bem_lhs, bem_rhs_operator, bem_interface_block = _combine_condensed_bem_operators!(operators, prepared, wavenumber)
     return (
         bem_lhs=bem_lhs,
@@ -1824,6 +1977,10 @@ function build_condensed_coupled_system(
         error("Coupled cache symmetry mode does not match requested symmetry.")
     prepared.retained_fem_vertices == retained_fem_vertices ||
         error("Coupled cache retained FEM vertices do not match the current moving surfaces.")
+
+    assembly_plan, combined_identity = _condensed_bem_assembly_plan(condensed_cache, prepared, T, selected_quadrature_order)
+    assembly_plan.fallback_reason === nothing || push!(optimization_fallbacks,
+        "combined Metal BEM assembly not used: " * assembly_plan.fallback_reason)
 
     omega = T(2pi) * frequency_hz
     wavenumber = omega / sound_speed
@@ -1968,7 +2125,9 @@ function build_condensed_coupled_system(
         bem_operator_started = time_ns()
         prefetched = nothing
         operators = if isnothing(bem_operators)
-            _assemble_condensed_bem_operators(bem_mesh, prepared, wavenumber, singular_order)
+            _assemble_condensed_bem_operators(
+                bem_mesh, prepared, wavenumber, singular_order; combined_identity=combined_identity,
+            )
         else
             # Assembled and combined ahead by the sweep pipeline (`assemble_condensed_bem_operators`);
             # waiting for it here keeps the FEM task above overlapping whatever is still in flight.
@@ -2179,7 +2338,7 @@ function build_condensed_coupled_system(
             )
             if transducer_count > 0
                 motion_coupling = _split_timed!(
-                    () -> interface_block * presolve.motion_solution, elimination_split, :product,
+                    () -> _host_zgemm(interface_block, presolve.motion_solution), elimination_split, :product,
                 )
                 _split_timed!(() -> (coupled[bem_range, mechanical_range] .+= motion_coupling), elimination_split, :scatter)
             end
@@ -2207,7 +2366,7 @@ function build_condensed_coupled_system(
             schur_double = nothing
             interface_block = _split_timed!(() -> ComplexF64.(bem_interface_block), elimination_split, :block_convert)
             schur_coupling, motion_coupling = _split_timed!(elimination_split, :product) do
-                (interface_block * schur_solution, interface_block * motion_solution)
+                (_host_zgemm(interface_block, schur_solution), _host_zgemm(interface_block, motion_solution))
             end
             _split_timed!(elimination_split, :scatter) do
                 for column in eachindex(bem_columns)
@@ -2289,6 +2448,8 @@ function build_condensed_coupled_system(
         prescribed_bem_rhs=bem_prescribed_rhs,
         prescribed_bem_neumann=bem_prescribed_neumann,
         bem_backend=prepared.bem_backend,
+        coupled_bem_assembly=assembly_plan.mode,
+        coupled_bem_assembly_fallback_reason=assembly_plan.fallback_reason,
         linear_backend=:cpu,
         symmetry_mode=prepared.symmetry_mode,
         cache=condensed_cache,

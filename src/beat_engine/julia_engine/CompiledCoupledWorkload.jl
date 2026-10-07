@@ -144,19 +144,22 @@ function coupled_workload_environment(; mumps::Bool)
     )
     # Every coupled and MUMPS override from the installing environment is cleared, so the
     # workload resolves the engine's own defaults (quadrature, Schur blocks, threads included).
-    inherited = [name => nothing for name in keys(ENV)
+    inherited = [name for name in keys(ENV)
                  if startswith(name, "BLAB_COUPLED_") || startswith(name, "BLAB_MUMPS_")]
-    settings = withenv(inherited..., (name => nothing for (name, _) in modes)...) do
-        [name => string(select(:metal)) for (name, select) in modes]
+    # One pair per name: `withenv` restores duplicate keys in order, so a name cleared twice
+    # would come back cleared instead of with the caller's value.
+    cleared = unique!(vcat(inherited, [name for (name, _) in modes]))
+    resolved = withenv((name => nothing for name in cleared)...) do
+        Dict(name => string(select(:metal)) for (name, select) in modes)
     end
-    prepend!(settings, inherited)
-    if !mumps
-        index = findfirst(pair -> first(pair) == "BLAB_COUPLED_FEM_SOLVER", settings)
-        settings[index] = "BLAB_COUPLED_FEM_SOLVER" => "umfpack"
-    end
+    # One entry per name, applied in order: clear the inherited override, then the resolved
+    # workload default, then the host workload's own solver and overlap choices.
+    effective = Dict{String,Union{Nothing,String}}(name => nothing for name in inherited)
+    merge!(effective, resolved)
+    mumps || (effective["BLAB_COUPLED_FEM_SOLVER"] = "umfpack")
     # There is no device work to overlap in the surrogate host workload.
-    push!(settings, "BLAB_COUPLED_STAGE_OVERLAP" => "off")
-    return settings
+    effective["BLAB_COUPLED_STAGE_OVERLAP"] = "off"
+    return Pair{String,Union{Nothing,String}}[name => effective[name] for name in sort!(collect(keys(effective)))]
 end
 
 function solve_coupled_workload(request)
@@ -201,7 +204,8 @@ end
 
 function reset_compiled_workload_state!()
     for cleanup in (release_all_bem_field_evaluation_caches!,
-                    BeatEngineCoupledCondensed.BeatEngineMumps.reset_precompile_state!)
+                    BeatEngineCoupledCondensed.BeatEngineMumps.reset_precompile_state!,
+                    BeatEngineCoupledCondensed.reset_accelerate_zgemm!)
         try
             cleanup()
         catch exception
