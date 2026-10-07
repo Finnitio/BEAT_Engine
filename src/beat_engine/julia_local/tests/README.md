@@ -18,6 +18,10 @@ from a copied engine tree outside the checkout, after the ordinary Julia suite.
 |---|---|---|
 | Exterior BEM and arbitrary complex-pressure probes | Manufactured outgoing Helmholtz point-source solution enclosed by a generated 128-face surface | Relative complex field error below 8% at three exterior points |
 | Independent excitations | Centered and displaced enclosed point sources; complex combination of separately solved traces versus a combined solve | Each source matches its analytical field; complex superposition at relative tolerance 1e-12 |
+| Rigid-source direction and frame | Compiled v2 driven patch on an asymmetric closed tetrahedron, with the complete problem rotated 90 degrees about x/y and by a generic rotation, in both phasors | Complex Neumann data, boundary pressure, observed field and generalized impedance agree with the unrotated z drive at relative/absolute tolerance 1e-10 on CPU, 8e-4 on Metal |
+| Per-component generalized force | Two compiled v2 sources, each owning two differently weighted boundaries and a different global axis; independent pressure-column integration in both port orders and both phasors | Each component's radiation impedance equals its own signed weighted pressure integral; reversing ports reverses pressure/Neumann columns while preserving radiator order, on CPU and available Metal |
+| Axis builder and reductions | Float64 maximum and smallest positive subnormal before Float32/Float64 conversion; malformed axes and isolated X/Y reduction violations | Unit direction at both extremes; refuse zero, non-finite, non-numeric and wrong-shape axes; accept in-plane x/xy motion and arbitrary ground motion |
+| Translating rigid sphere | Compiled v2 unit velocity along x, y, z and an oblique axis, compared with the outgoing dipole solution on generated 128/512-face spheres in both phasors | Fine-mesh relative complex field error below 8% and less than half the coarse error, real gain above 0.92; both meshes check phase within 0.08 radians, positive gain and signed boundary derivative against Euler |
 | Retained fields | Re-evaluate solved pressure/Neumann traces at exterior points; complex scaling and combination | Relative tolerance 1e-12 |
 | X and XY symmetry | Reduced field evaluation versus separately constructed full reflected geometry, including normal orientation | Relative tolerance 1e-12, absolute 1e-14 |
 | Interior FEM | Generated sealed unit-cube cavity modes, exact affine tetrahedron matrices, and preserved mesh matrix references | Existing mode discretization tolerance 8%; existing matrix/precision tolerances unchanged |
@@ -32,6 +36,23 @@ exterior domain satisfies homogeneous Helmholtz. The oracle does not call BEAT's
 Green-function implementation. Facet-centroid DP0 data and the coarse P1 mesh
 introduce discretization error; the 8% bound is an accuracy guard, not a promise
 of production convergence. The assertions compare complex pressure, not SPL.
+
+The translating-sphere oracle in `axial_source_tests.jl` uses the exact outgoing
+degree-one spherical wave. For radius `a`, real unit translation velocity along
+`u`, and negative time, it is
+`p(x) = i*rho*omega*h1(k*r)/(k*h1'(k*a))*dot(u,x/r)` with
+`h1(z) = -exp(i*z)*(z+i)/z^2`. The normal derivative at the surface follows
+independently from linearized Euler, `dp/dr = i*rho*omega*dot(u,x/r)`.
+Positive time conjugates the radial wave and reverses that derivative's sign.
+See [NASA-CR-98418, Appendix B, equations B-1–B-4](https://ntrs.nasa.gov/api/citations/19690015869/downloads/19690015869.pdf).
+The tests implement explicit Hankel expressions without calling engine phasor
+helpers or Green functions, then compare the public compiled solve's complex
+outputs. The 8% bound is retained from the monopole check. The translating sphere
+also requires error to decrease by at least a factor of two on refinement from
+128 to 512 planar facets, distinguishing geometry error from a persistent sign
+error. Rotation checks use solver precision, without discretization slack.
+These tests run on CPU in both ordinary and reference suites, and additionally
+on Metal when the runtime suite's functional-device gate is available.
 
 Condensed-versus-monolithic tests are independent elimination/formulation checks
 but share assembly kernels. They complement the analytical checks; they do not
@@ -88,3 +109,42 @@ coupled cache reuse across frequencies, and full-diagnostic fallback. The tests
 preserve complex pressure/flux and independent source columns. Run with the
 CUDA Julia project and a functional device; an unavailable-device skip does not
 qualify this architecture.
+
+Source requests accept `config.symmetry = "ground"` for a rigid image plane at
+Y=0. Mesh coordinates (including `meshes[].translation_m`) must put the whole
+radiator at Y >= 0, with no triangle flat on the plane. Contact vertices and
+edges are allowed. Ground and native mirror modes (`x`, `xy`) are exclusive
+values of the same option. The image contributes to pressure, but counts as
+one physical radiator for impedance. The optional
+`ground_plane_min_clearance_m` must be finite and non-negative and enforces
+clearance of the radiator surface in metres; its default of zero allows contact
+edges. Compiled requests use the same guard and option in solver options.
+Placement and observation-frame mapping remain the caller's responsibility.
+
+`source_ground_contract_tests.jl` runs on CPU in both `runtests.jl` and the
+standalone reference gate. It checks domain refusals, clearance, unchanged
+native mirror counts, and an active ground image without a 6.02 dB impedance
+increase through both source assembly paths. Additional Metal parity cases are
+opt-in: set `BLAB_VALIDATE_GROUND=1` when running
+`scripts/validate_metal_symmetry.jl` with the `julia_metal` project on a functional
+Metal device. They cover lifted `sample_half.msh` and resting-edge
+`sample_quarter.msh` with the existing operator, pressure and field bounds.
+
+## CPU near-correction invariant
+
+`runtests.jl` includes `near_correction_rule_independence.jl`, which can also run
+standalone with the `julia_local` project. It corrects every disjoint pair on
+full, half and quarter octahedral surfaces. All four corrected q1/q4 operators
+must agree within 1e-12 relative error for `off`, `x` and `xy`; uncorrected q1/q4
+controls must differ by more than 1e-6. The xy case uses all three image caches.
+
+Source requests opt in with `config.near_correction_enabled=true` on CPU.
+`near_correction_cutoff` defaults to 2.0 and measures centroid separation divided
+by the sum of each face's maximum vertex radius about its centroid.
+`near_correction_order` defaults to 8 (minimum 4); individual pair orders decrease
+with separation. Singular pairs retain their existing Duffy correction. Enabled
+requests use four-operator assembly, bypassing the fused Burton-Miller path,
+and report applied pair count, maximum order and selected image-transform count
+in result diagnostics. The source option rejects CUDA, ROCm and Metal before
+loading geometry or devices. Existing explicit compiled proximity inputs and
+CUDA single-cache entry points retain their contracts.
