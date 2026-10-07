@@ -11,6 +11,66 @@ a quadrant plate with non-adjacent and image-singular pairs, xy symmetry,
 1/20 kHz, order-4 rules, a 37-by-72 sphere, a diagonal cut and boundary traces.
 `CompiledExteriorWorkload.jl` keeps that representative request shared.
 
+`CompiledCoupledWorkload.jl` adds the condensed FEM-BEM-LEM host graph. The
+Metal bundle uses the frozen `ENGINE_DIR/tests/fixtures/femvolume.msh` and
+`exterior_conforming.msh` (shipped by the wheel's `src/beat_engine` package
+selection), with millimeter scaling, a bounded air volume, a rigid exterior,
+their conforming interface and an electrodynamic transducer on `Radiator`.
+A voltage port drives 500/1000 Hz; outputs are two exterior pressure points,
+diaphragm velocity, voice-coil current and interface average normal velocity.
+The wire topology is built from the loaded meshes with zero-based indices.
+
+As with the exterior workload, BEM assembly runs on CPU during precompilation.
+The helper resolves the engine's Metal optimization defaults with installation
+overrides temporarily cleared, then applies those choices to the CPU request.
+This reaches FEM assembly, transducer condensation, flux elimination, MUMPS
+Schur extraction, CHOLMOD interface mass and `RefinedDenseLU` without an engine
+GPU launch. Result diagnostics assert the selected solvers and log any failure;
+refinement fallback is allowed but warns with its reason. The CPU bundle uses
+the same request graph on four tetrahedra/four BEM triangles, with UMFPACK
+instead of MUMPS. CPU CI validates the full fixture request and solves the tiny
+variant through the compiled entry and the explicit include fallback.
+
+The driver's `finally` releases systems and frequency-invariant caches. The
+workload also releases retained field caches, releases any remaining live MUMPS
+solvers, clears `LIBRARY` (native function pointers), `LIVE_SOLVERS` and
+`ATEXIT_REGISTERED`, clears mesh/engine/runtime provenance, and collects
+unreachable CHOLMOD/UMFPACK factors before image generation finishes. MUMPS
+`__init__` clears the pointer cache and exit-hook flag in every fresh process,
+so its lazy loader re-requires the JLLs, resolves symbols, self-tests and
+forwards LP64 BLAS if needed. The native libblastrampoline forwarding tables
+are process-local, not serialized Julia image data; they need no undo in the
+build process. No device arrays are created by this host workload. The existing
+Metal kernel workload clears process-local device state after compile/link.
+Measured on an M1 Max (Julia 1.12.7, fresh worker, package images already
+built, Multi_region_SAWMOD, 10 frequencies): worker start-up plus first request
+was 21.4 + 38.2 s on `main`, 3.8 + 19.7 s with the exterior workload alone, and
+3.8 + 10.0-10.2 s with the coupled workload; `F2B_FLH` 3.6 + 16.7 s against
+3.9 + 7.0 s.
+
+The host workload does not reach the Metal side of the coupled path (Metal-typed
+cache structures, `metal_host_operators`, the regular-operator gather/scatter
+drivers and launch closures, symmetry row weights, the spawned FEM stage), so
+`MetalCoupledPrecompile.jl` adds compile-only signatures for it, traced from a
+fresh worker's first Metal coupled request (172 compiled statements, 5.6 s; the
+inventory targets the 58 that took 4.7 s). Types are spelled out as descriptors
+(Float32 Metal caches and shared operator tuples, Float64 FEM and MUMPS
+condensation, CHOLMOD mass blocks, refined dense LU, the per-excitation solution
+schema) without creating caches, factors or device arrays. Compiler-generated
+closures (the solution generator, timed solve/product closures, the FEM stage,
+Metal's autorelease launch closure) are found by their exact captured-field
+names, never by generated names, and the keyword body through
+`Base.bodyfunction`. Kernel argument types come from `metal_kernel_signatures()`.
+Left out on purpose: the wire parser's stateless generators, LLVM/ghost-type
+compiler helpers, Metal broadcast internals and shutdown/archive callbacks, which
+have no robust structural handle. With it, the first request falls to 3.9 +
+4.7-4.9 s on the same SAWMOD measurement. `compiled_metal_worker_tests.jl` and
+`metal_host_tests.jl` check that every entry still `precompile`s; because that
+cannot show an entry still matches the production types, the hardware gate
+`metal_coupled_precompile_coverage_tests.jl` runs the coupled request with Metal
+BEM in a fresh worker under `--trace-compile` and fails when coupled-path
+compilation exceeds `BLAB_COUPLED_COMPILE_BUDGET_MS` (1,500 ms).
+
 `MetalHostPrecompile.jl` additionally calls `precompile(f, argtypes)` for the
 Float32 native exterior path: fused assembly and gather orchestration, host
 launch methods, array construction/conversion, shared-buffer wrapping, dense

@@ -153,3 +153,104 @@ function metal_sweep_assembly_lookahead(
     end
     return sweep_pipeline_depth(system_bytes, metal_sweep_memory_available(), frequency_count)
 end
+
+# Coupled (condensed FEM-BEM) sweeps on Metal pipeline differently from the
+# exterior ones above. Within a frequency the host FEM condensation (S) already
+# runs beside the GPU assembly of the BEM operators (G) and the host combination
+# of those operators into the Burton-Miller blocks (C) that follows it. After
+# both, the host assembles, factors and solves the coupled system (L). Per
+# frequency:
+#
+#     sequential   max(G + C + R, S) + L
+#     pipelined    max(G + C, max(S, R) + L)
+#
+# where R is the BEM-stage host work the producer does not take over (motion and
+# prescribed-source products, an interface-radiation replay LU), which runs
+# before the FEM task is collected and so overlaps it in both schedules. The
+# pipeline moves G and C onto a producer that runs one frequency ahead. With
+# R = 0 the saving is min(L, G + C - S): zero when the FEM side already binds (a
+# large FEM interior behind a small exterior), at most L when the GPU side does. It is the bound docs/Benchmarking.md asks for, with
+# the combine counted on the GPU side. All four times are measured in the run
+# itself, on the frequencies solved before the pipeline starts, so the decision
+# follows the machine and the model instead of a constant. Running the producer
+# beside the host stages costs them memory bandwidth -- on an M1 Max about half
+# the modelled saving on Multi_region_SAWMOD -- hence the 10% threshold.
+
+const COUPLED_SWEEP_PIPELINE_ENV = "BLAB_COUPLED_SWEEP_PIPELINE"
+const COUPLED_SWEEP_PIPELINE_MIN_SAVING_ENV = "BLAB_COUPLED_SWEEP_PIPELINE_MIN_SAVING"
+
+"""Smallest modelled saving, as a fraction of a sequential frequency, that turns the coupled pipeline on."""
+const COUPLED_SWEEP_PIPELINE_MIN_SAVING_DEFAULT = 0.10
+
+"""
+    coupled_sweep_pipeline_saving_seconds(bem_operator_s, bem_combine_s, fem_task_s, host_rest_s,
+                                          retained_s=0) -> (saving_s, sequential_s)
+
+Modelled seconds per frequency that the coupled sweep pipeline saves, and the sequential
+per-frequency time it is measured against, from sequential sections: G (`bem_operator_s`), C
+(`bem_combine_s`, what the producer takes over), S (`fem_task_s`), L (`host_rest_s`, the host work
+after the FEM task is collected) and R (`retained_s`, BEM-stage host work that stays on the host,
+before the FEM task is collected): `max(G + C + R, S) + L - max(G + C, max(S, R) + L)`.
+"""
+function coupled_sweep_pipeline_saving_seconds(
+    bem_operator_s::Real,
+    bem_combine_s::Real,
+    fem_task_s::Real,
+    host_rest_s::Real,
+    retained_s::Real=0,
+)
+    G, C, S, L, R = Float64.((bem_operator_s, bem_combine_s, fem_task_s, host_rest_s, retained_s))
+    sequential = max(G + C + R, S) + L
+    return (saving_s=sequential - max(G + C, max(S, R) + L), sequential_s=sequential)
+end
+
+"""
+    coupled_sweep_pipeline_plan(timings; remaining_frequencies, bem_backend, in_flight_bytes,
+                                available_bytes, threads, setting, min_saving)
+
+Whether a coupled sweep should assemble the remaining frequencies' BEM operators
+one frequency ahead, and why. `timings` holds mean `bem_operator_s`,
+`bem_combine_s`, `fem_task_s`, `host_rest_s` and optionally `retained_s`: the
+driver passes medians over the sequentially solved frequencies after the first. `reason` is `:single_thread`, `:single_frequency`, `:override`
+(`BLAB_COUPLED_SWEEP_PIPELINE=on|off`), `:backend` (`auto` pipelines Metal only),
+`:memory` (two more operator sets would not fit in half the free working set),
+or `:model`. The modelled saving is returned either way, for diagnostics.
+"""
+function coupled_sweep_pipeline_plan(
+    timings;
+    remaining_frequencies::Integer,
+    bem_backend::Symbol,
+    in_flight_bytes::Integer,
+    available_bytes::Union{Nothing,Integer}=nothing,
+    threads::Integer=Threads.nthreads(),
+    setting::AbstractString=get(ENV, COUPLED_SWEEP_PIPELINE_ENV, "auto"),
+    min_saving::Real=_overlap_env_float(COUPLED_SWEEP_PIPELINE_MIN_SAVING_ENV, COUPLED_SWEEP_PIPELINE_MIN_SAVING_DEFAULT),
+)
+    model = coupled_sweep_pipeline_saving_seconds(
+        timings.bem_operator_s, timings.bem_combine_s, timings.fem_task_s, timings.host_rest_s,
+        hasproperty(timings, :retained_s) ? timings.retained_s : 0.0,
+    )
+    setting = lowercase(strip(setting))
+    setting in ("auto", "on", "off") || error(
+        "Unsupported $COUPLED_SWEEP_PIPELINE_ENV value: $(repr(setting)). Expected auto, on, or off.",
+    )
+    enabled, reason = if threads <= 1
+        false, :single_thread
+    elseif remaining_frequencies < 2
+        false, :single_frequency
+    elseif setting != "auto"
+        setting == "on", :override
+    elseif bem_backend != :metal
+        false, :backend
+    elseif available_bytes !== nothing && 0.5 * available_bytes < 2 * in_flight_bytes
+        false, :memory
+    else
+        model.saving_s > min_saving * model.sequential_s, :model
+    end
+    return (
+        enabled=enabled,
+        reason=reason,
+        saving_model_s=model.saving_s,
+        sequential_model_s=model.sequential_s,
+    )
+end

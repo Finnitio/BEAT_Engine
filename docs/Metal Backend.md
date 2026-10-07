@@ -409,6 +409,66 @@ assembly starts, so it spans the concurrent region and must not be added to
 `bem_operator_s`; `stage_overlap` in the system timings says which reading
 applies.
 
+### Coupled sweep pipeline
+
+The stage overlap hides the FEM condensation behind the GPU, but on a model
+with a large exterior it is the other way round: the GPU assembly is the longer
+of the two, and the host then still has to combine the operators, assemble and
+factor the coupled system, solve and evaluate the field while the GPU idles.
+On Multi_region_SAWMOD (M1 Max) the BEM operators take 0.81 s per frequency,
+the FEM condensation beside them 0.50 s (`fem_task_s`), and the host work after
+both 0.63 s.
+
+A coupled sweep therefore assembles and combines the next frequency's BEM
+operators on a producer task -- `assemble_condensed_bem_operators`, the same
+code `build_condensed_coupled_system` runs, handed back through its
+`bem_operators` argument -- while the host finishes the current frequency. The
+producer reuses the exterior sweep's `start_sweep_assembly_pipeline` at depth
+one. Outputs are bit-identical with the pipeline on and off.
+
+Whether to run it is decided in the run itself. Frequencies solve sequentially
+until `coupled_sweep_pipeline_plan` predicts a saving from the median section
+times of the sequential frequencies so far, leaving out the first (one-off
+compilation and cache costs) and waiting for at least two; medians keep a
+one-off spike -- the first frequency at a new quadrature order -- from deciding:
+
+```text
+sequential  max(G + C + R, S) + L
+pipelined   max(G + C, max(S, R) + L)
+```
+
+with `G` the BEM operator assembly, `C` its combination into the Burton-Miller
+blocks (what the producer takes over), `R` the rest of the BEM matrix stage that
+stays on the host (motion and prescribed-source products, an interface-radiation
+replay LU) and overlaps the FEM task, `S` the FEM condensation task, and `L` the
+coupled block assembly and factorization. With `R = 0` the saving is
+`min(L, G + C - S)` when `G + C > S`, otherwise zero. It starts the producer when the saving exceeds 10% of a
+sequential frequency (`BLAB_COUPLED_SWEEP_PIPELINE_MIN_SAVING`) and two more
+combined operator sets fit in half of Metal's free working set. A model with a
+large FEM interior behind a small exterior -- `F2B_FLH`, where `S` already
+exceeds `G + C` -- stays sequential; forcing the pipeline on there measured 4%
+slower. The modelled saving overstates the measured one: the producer and the
+host stages share the memory system, and on SAWMOD the host block assembly and
+dense LU ran 30-50% slower beside it.
+
+Measured on an M1 Max (eight Julia threads, eight BLAS threads), warm worker,
+interleaved runs, Multi_region_SAWMOD:
+
+| Sweep | Sequential | Pipelined | Change |
+| --- | ---: | ---: | ---: |
+| 40 frequencies, 20 Hz-20 kHz | 64.7-77.0 s, median 70.9 (7 runs) | 54.8-60.0 s, median 57.7 (6 runs) | -19% |
+| 200 frequencies, 20 Hz-20 kHz (GUI order), with MUMPS on Accelerate | 321.0 s | **248.7 s** | -23% |
+
+Peak worker memory grows by about 1 GB (5.2 to 6.1 GB on the 200-frequency
+sweep), the producer's queued and in-flight operator sets. On `F2B_FLH` the
+plan keeps the sweep sequential.
+
+Result diagnostics report `coupled_sweep_pipeline` (whether this frequency's
+operators came from the producer), `coupled_sweep_pipeline_reason` and
+`coupled_sweep_pipeline_saving_model_s`. `fem_task_s` in the timings is the FEM
+condensation task's own duration, which `fem_condensation_s` cannot show when
+the stages overlap.
+
 ### Schur block balance
 
 The Schur complement hands right-hand-side blocks to worker tasks round-robin,
@@ -488,6 +548,34 @@ variable is set explicitly.
 not download them; there `mumps` falls back with the reason "MUMPS_seq_jll is
 not in this Julia environment". Its tests are `tests/mumps_tests.jl`, run under
 `julia_metal` in the macOS CI job.
+
+MUMPS calls the LP64 BLAS interface, which Julia's own configuration (ILP64
+OpenBLAS) leaves empty. On Apple Silicon the loader forwards Apple Accelerate's
+LP64 interface (the macOS 13.3 "new LAPACK" symbols) into it; elsewhere, or if
+that forward fails, `OpenBLAS32_jll`. Only the LP64 slots change, so Julia's
+own dense LU and products keep OpenBLAS and their thread count, and their
+results are bit-identical either way. `BLAB_MUMPS_BLAS=openblas` restores the
+OpenBLAS route; result diagnostics report `mumps_blas`. The MUMPS
+factorization's rounding changes with the BLAS, far below the Float32 output
+precision. On Multi_region_SAWMOD at ten frequencies from 20 Hz to 20 kHz the
+Accelerate route agrees with the OpenBLAS route to 8.4e-9 relative L2 in pressure
+(2.8e-5 dB worst within 30 dB of each output's peak), 1.9e-12 in diaphragm
+velocity and 4.6e-10 in interface velocity, and both measure the same 9.8e-6
+relative L2 (1.7e-3 dB) in pressure against the CPU Float64 reference.
+
+Measured on an M1 Max (eight Julia threads, eight BLAS threads), 40 frequencies
+from 20 Hz to 20 kHz, warm worker, interleaved runs:
+
+| Fixture | OpenBLAS32 (s per sweep) | Accelerate (s per sweep) | `fem_condensation_factorization_s` |
+| --- | ---: | ---: | --- |
+| `F2B_FLH` (large FEM interior, small exterior) | 23.0, 23.3, 24.6 | **15.4, 15.6** | 0.25-0.27 s to 0.15 s |
+| `Multi_region_SAWMOD` | 70.9, 72.3 | 67.4, 77.1 | 0.42 s to 0.26-0.27 s |
+
+On `F2B_FLH` the FEM condensation is the critical path, and the whole sweep is
+33% faster; the host block assembly and dense LU also run faster beside it, as
+MUMPS no longer occupies the cores with OpenBLAS threads. On SAWMOD the
+condensation already hides behind the GPU BEM assembly, so the faster
+factorization does not shorten the sweep (the spread is run-to-run noise).
 
 On Multi_region_SAWMOD (three transducers, three FEM regions, four interfaces,
 xy symmetry; M1 Max, eight Julia threads, 4 frequencies, 3 interleaved rounds)
@@ -588,6 +676,8 @@ Normal application use does not require these environment variables.
 | `BLAB_METAL_OVERLAP_HOST_SLOWDOWN` | `0.1` | |
 | `BLAB_METAL_ATOMIC_SCATTER` | `1` | Diagnostic for `pair_atomic` only: `0` skips the atomic scatter to time the pair arithmetic (the operators are then wrong). |
 | `BLAB_COUPLED_STAGE_OVERLAP` | `auto` | Coupled solves: `auto` runs the FEM condensation on its own thread while the GPU assembles the BEM operators; `off` runs them in sequence; `on` forces the overlap on `beat_cpu` too. Needs more than one Julia thread. |
+| `BLAB_COUPLED_SWEEP_PIPELINE` | `auto` | Coupled sweeps: `auto` assembles the next frequency's BEM operators ahead when the run's own section times predict a saving (see [Coupled sweep pipeline](#coupled-sweep-pipeline)); `on` forces it from the second frequency, `off` never. Needs more than one Julia thread. |
+| `BLAB_COUPLED_SWEEP_PIPELINE_MIN_SAVING` | `0.10` | Smallest modelled saving, as a fraction of a sequential frequency, that starts the coupled sweep pipeline under `auto`. |
 | `BLAB_COUPLED_DENSE_REFINEMENT` | `auto` on Metal, `off` elsewhere | Coupled Float32 solves: assemble the dense system in `ComplexF64`, factor in `ComplexF32`, refine to the Float64 backward error (falls back to a `ComplexF64` LU with a reason). `1`/`auto`/`0`. |
 | `BLAB_COUPLED_DENSE_FLOAT64` | `off` | Coupled Float32 solves: plain `ComplexF64` dense LU instead (refinement takes precedence when both are on). |
 | `BLAB_COUPLED_FEM_FLOAT64` | `auto` on Metal, `off` elsewhere | Coupled Float32 solves: assemble the FEM stiffness, mass and bulk-loss matrices in `Float64`. |
@@ -599,7 +689,8 @@ Normal application use does not require these environment variables.
 | `BLAB_COUPLED_INTERFACE_BLOCKS` | `auto` on Metal, `off` elsewhere | As above. |
 | `BLAB_COUPLED_DEMAND_RECONSTRUCTION` | `auto` on Metal, `off` elsewhere | As above. |
 | `BLAB_COUPLED_FEM_SOLVER` | `mumps` on Metal, `umfpack` elsewhere | `umfpack` or `mumps`. |
-| `BLAB_MUMPS_THREADS` / `BLAB_MUMPS_SOLVE_THREADS` | `4` / `1` | BLAS threads for the MUMPS factorization and solve phases. |
+| `BLAB_MUMPS_BLAS` | `auto` | LP64 BLAS behind MUMPS: `auto` is Apple Accelerate on Apple Silicon and `OpenBLAS32_jll` elsewhere; `accelerate` or `openblas` asks for one. |
+| `BLAB_MUMPS_THREADS` / `BLAB_MUMPS_SOLVE_THREADS` | `4` / `1` | OpenBLAS threads for the MUMPS factorization and solve phases (Accelerate schedules its own). |
 | `BLAB_SCHUR_BLOCK` | unset | Coupled solves: pins the Schur complement right-hand-side block width, bypassing the thread-count balancing. For measurement only. |
 | `BLAB_BEAT_FUSED_BM` | `1` | Set to `0` to assemble the four operators and combine them on the host for exterior solves. Coupled solves, `host_staged` assembly and the `host` singular mode always take the four-operator path. |
 
@@ -640,6 +731,7 @@ CPU-versus-Metal validation scripts:
 | `validate_metal_coupled.jl` | Coupled FEM-BEM-LEM assembly, condensation, solution, and field for the monolithic and condensed paths, prescribed-velocity and voltage excitations. |
 | `validate_metal_sweep_pipeline.jl` | The sweep assembly pipeline at depths 1-4: steps delivered in order with their own frequency, and pipelined assemblies against sequential ones. |
 | `validate_metal_exterior_pipeline.jl` | A compiled exterior request solved sequentially and overlapped at depths 1-4 through the worker: every output bit-identical and labelled with its own frequency. `BLAB_VALIDATE_SYMMETRY` picks the arm. |
+| `validate_metal_coupled_pipeline.jl` | A condensed coupled sweep built from operators the sweep pipeline assembled ahead against the same sweep built sequentially: every solution bit-identical, prescribed-velocity and voltage excitations. |
 
 For example:
 
@@ -667,6 +759,27 @@ CPU-versus-Metal differences exceed their tolerances.
   The enabled compiled Metal entry loads Metal before JSON to match the bundle
   dependency order and retain its cached worker call graph. Explicit fallback
   and other backend entry orders are unchanged.
+  The shared `CompiledCoupledWorkload.jl` also decodes a two-frequency coupled
+  request using the packaged `femvolume.msh` and `exterior_conforming.msh`
+  fixtures: one FEM air volume, one BEM exterior, a conforming interface and a
+  voltage-driven Radiator transducer, with pressure, velocity, current and
+  interface-average velocity outputs. It uses CPU BEM assembly while selecting
+  the engine's Metal condensed defaults, avoiding engine GPU launches during
+  image generation. Diagnostics check MUMPS Schur condensation, CHOLMOD
+  interface mass, flux elimination and refined dense LU; failures and refinement
+  fallbacks warn. CPU uses a tiny analogue with UMFPACK in place of MUMPS.
+  Workload cleanup releases native factors and clears MUMPS pointers/live-solvers,
+  provenance and field caches; fresh-process initialization reloads MUMPS and
+  forwards LP64 BLAS again. Metal's existing device-state cleanup remains in
+  place. Measured on an M1 Max (Julia 1.12.7, fresh worker, package images already
+  built, Multi_region_SAWMOD, 10 frequencies): worker start-up plus first request
+  was 21.4 + 38.2 s on `main`, 3.8 + 19.7 s with the exterior workload alone, and
+  3.8 + 10.0-10.2 s with the coupled workload; `F2B_FLH` 3.6 + 16.7 s against
+  3.9 + 7.0 s. The remaining first-request compilation is mostly the Metal side
+  of the coupled path, which this host workload does not reach: Metal-typed
+  cache structures, `metal_host_operators` and the regular-operator orchestration,
+  and the spawned FEM stage (the workload runs it inline). Covering those needs
+  compile-only signatures traced from a Metal coupled request.
 - The generated kernel inventory is checked against production requests by
   `metal_kernel_coverage_tests.jl` in Metal hardware qualification. See the
   [bundle README](../src/beat_engine/julia_engine/BeatEngineCompiledMetalBundle/README.md)

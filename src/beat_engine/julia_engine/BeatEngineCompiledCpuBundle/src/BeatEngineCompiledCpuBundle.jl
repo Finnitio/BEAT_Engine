@@ -5,8 +5,8 @@ A precompilable home for the compiled-contract worker (`coupled_solver.jl`)
 on the CPU backend. See BeatEngineCpuBundle for why a package and not a script:
 `coupled_solver.jl` used to `include` the whole engine and its 3,900-line
 driver from source on every worker start. The driver lives in
-`BeatEngineCompiledDriver.jl`; this package includes it and runs a compiled
-exterior request as its precompile workload so the compiled call graph is
+`BeatEngineCompiledDriver.jl`; this package includes it and runs compiled
+exterior and coupled requests as its precompile workload so the compiled call graph is
 cached in the pkgimage.
 
 `BEAT_ENGINE_BACKEND` names the backend for `BeatEngineCore` (a child module
@@ -106,6 +106,7 @@ function __init__()
 end
 
 include(joinpath(@__DIR__, "..", "..", "CompiledExteriorWorkload.jl"))
+include(joinpath(@__DIR__, "..", "..", "CompiledCoupledWorkload.jl"))
 
 @compile_workload begin
     # One compiled exterior request per symmetry mode, through the same
@@ -130,6 +131,9 @@ include(joinpath(@__DIR__, "..", "..", "CompiledExteriorWorkload.jl"))
     finally
         rm(directory; force=true, recursive=true)
     end
+    # CPU ships no MUMPS artifact. The tiny analogue caches the remaining
+    # condensed host path, including the Metal CHOLMOD/refinement choices.
+    precompile_coupled_workload(; tiny=true, mumps=false)
     precompile(run_worker, ())
 end
 

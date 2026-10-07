@@ -2939,6 +2939,32 @@ function solve_request_impl(request; event_mode=false)
     radiation_has_other = any(boundary -> String(boundary["region_id"]) == String(unbounded_region["id"]) &&
         String(boundary["kind"]) == "moving", boundaries)
     coupled_system = nothing
+    # BLAB_COUPLED_SWEEP_PIPELINE: once the frequencies solved so far show the GPU side on the
+    # critical path (`coupled_sweep_pipeline_plan`), assemble and combine the remaining frequencies'
+    # BEM operators one frequency ahead while the host condenses, factors, solves and evaluates the
+    # current one. Same operators, same algebra: the outputs are bit-identical.
+    sweep_pipeline = nothing
+    sweep_pipeline_start = 0
+    sweep_pipeline_plan = nothing
+    # Section times of the sequential frequencies after the first, one row per frequency.
+    sweep_pipeline_samples = NTuple{5,Float64}[]
+    release_pipelined_operators = produced -> release_condensed_bem_operators!(produced, bem_backend)
+    pipeline_frequencies = request["frequencies_hz"]
+    produce_operators = index -> assemble_condensed_bem_operators(
+        bem_mesh,
+        coupled_cache,
+        FloatType(pipeline_frequencies[index]),
+        sound_speed;
+        regular_quadrature_order=quadrature_selections === nothing ? nothing :
+                                 quadrature_selections[index].order,
+        singular_order=singular_order,
+    )
+    # Two more combined operator sets (the one queued and the one being built) live beside the
+    # sweep's own: the dense Burton-Miller matrix, its right-hand-side operator and `-C Q`.
+    pipeline_in_flight_bytes = sizeof(Complex{FloatType}) * length(bem_mesh.vertices) * (
+        length(bem_mesh.vertices) + length(bem_mesh.faces) + length(interface_map.fem_vertex_indices)
+    )
+    pipeline_candidate = use_condensed_solver && coupled_cache !== nothing && length(pipeline_frequencies) > 1
     try
         for (frequency_index, frequency_value) in enumerate(request["frequencies_hz"])
             if cancel_requested()
@@ -2971,6 +2997,8 @@ function solve_request_impl(request; event_mode=false)
                     # ROM exports and the rank experiment read transducer surfaces from the Schur block.
                     allow_transducer_condensation=!rom_requested &&
                         isnothing(get(solver_options, "speaker_rom_rank_experiment", nothing)),
+                    bem_operators=sweep_pipeline === nothing ? nothing :
+                                  () -> take_sweep_assembly!(sweep_pipeline, frequency_index - sweep_pipeline_start + 1),
                 )
             else
                 build_coupled_system(
@@ -2999,6 +3027,40 @@ function solve_request_impl(request; event_mode=false)
                 )
             end
             assembly_s = (time_ns() - assembly_started) / 1.0e9
+            if pipeline_candidate && sweep_pipeline === nothing && frequency_index > 1 &&
+               (sweep_pipeline_plan === nothing || sweep_pipeline_plan.reason in (:model, :memory))
+                timings = coupled_system.timings
+                # C is only the combination the producer takes over; R, the rest of the BEM matrix
+                # stage (motion and prescribed-source products, an interface-radiation replay LU),
+                # stays on the host but runs before the FEM task is collected. The first frequency
+                # is left out (one-off compilation and cache costs), and medians keep a one-off
+                # spike -- the first frequency at a new quadrature order -- from deciding.
+                push!(sweep_pipeline_samples, (
+                    timings.bem_operator_s,
+                    timings.bem_combine_s,
+                    timings.fem_task_s,
+                    timings.block_assembly_s + timings.coupled_factorization_s,
+                    timings.bem_matrix_s - timings.bem_combine_s,
+                ))
+                medians = [median(sample[column] for sample in sweep_pipeline_samples) for column in 1:5]
+                sweep_pipeline_plan = length(sweep_pipeline_samples) < 2 ? nothing : coupled_sweep_pipeline_plan(
+                    (bem_operator_s=medians[1], bem_combine_s=medians[2], fem_task_s=medians[3], host_rest_s=medians[4],
+                     retained_s=medians[5]);
+                    remaining_frequencies=length(pipeline_frequencies) - frequency_index,
+                    bem_backend=bem_backend,
+                    in_flight_bytes=pipeline_in_flight_bytes,
+                    available_bytes=bem_backend == :metal ? metal_sweep_memory_available() : nothing,
+                )
+                if sweep_pipeline_plan !== nothing && sweep_pipeline_plan.enabled
+                    sweep_pipeline_start = frequency_index + 1
+                    sweep_pipeline = start_sweep_assembly_pipeline(
+                        step -> produce_operators(sweep_pipeline_start + step - 1),
+                        length(pipeline_frequencies) - frequency_index,
+                        1,
+                        release_pipelined_operators,
+                    )
+                end
+            end
             # BLAB_COUPLED_DEMAND_RECONSTRUCTION: skip the interior back substitution only when every
             # requested output is known not to read interior FEM pressure.
             reconstruct_interior = !(
@@ -3491,6 +3553,9 @@ function solve_request_impl(request; event_mode=false)
                 "mumps_threads" => isnothing(coupled_system.condensation) ||
                                    !hasproperty(coupled_system.condensation, :mumps_threads) ?
                                    0 : coupled_system.condensation.mumps_threads,
+                "mumps_blas" => isnothing(coupled_system.condensation) ||
+                                !hasproperty(coupled_system.condensation, :mumps_blas) ?
+                                nothing : coupled_system.condensation.mumps_blas,
                 "fem_schur_block_size" => isnothing(coupled_system.condensation) ||
                                           !hasproperty(
                     coupled_system.condensation,
@@ -3542,6 +3607,10 @@ function solve_request_impl(request; event_mode=false)
                     "bem_operator_s" => coupled_system.timings.bem_operator_s,
                     "bem_matrix_s" => coupled_system.timings.bem_matrix_s,
                     "fem_condensation_s" => coupled_system.timings.fem_condensation_s,
+                    "fem_task_s" => hasproperty(coupled_system.timings, :fem_task_s) ?
+                                    coupled_system.timings.fem_task_s : 0.0,
+                    "bem_combine_s" => hasproperty(coupled_system.timings, :bem_combine_s) ?
+                                       coupled_system.timings.bem_combine_s : 0.0,
                     "fem_condensation_analysis_s" => isnothing(coupled_system.condensation) ?
                                                      0.0 :
                                                      coupled_system.condensation.timings.analysis_s,
@@ -3593,6 +3662,14 @@ function solve_request_impl(request; event_mode=false)
                 maximum(solution.fem_interior_residual for solution in solutions) : nothing
             diagnostics["fem_interior_reconstruction"] = !use_condensed_solver ? "monolithic" :
                                                          reconstruct_interior ? "evaluated" : "skipped"
+            if use_condensed_solver
+                diagnostics["coupled_sweep_pipeline"] = sweep_pipeline !== nothing &&
+                                                        frequency_index >= sweep_pipeline_start
+                diagnostics["coupled_sweep_pipeline_reason"] =
+                    sweep_pipeline_plan === nothing ? nothing : String(sweep_pipeline_plan.reason)
+                diagnostics["coupled_sweep_pipeline_saving_model_s"] =
+                    sweep_pipeline_plan === nothing ? nothing : sweep_pipeline_plan.saving_model_s
+            end
             isnothing(rank_experiment) ||
                 (diagnostics["speaker_rom_rank_experiment"] = rank_experiment)
             result = Dict(
@@ -3615,6 +3692,8 @@ function solve_request_impl(request; event_mode=false)
             solved_count = frequency_index
         end
     finally
+        # Before the cache: the producer assembles from the cache's device buffers.
+        shutdown_sweep_assembly_pipeline!(sweep_pipeline, release_pipelined_operators)
         if coupled_system !== nothing
             use_condensed_solver ? release_condensed_coupled_system!(coupled_system) :
             release_coupled_system!(coupled_system)

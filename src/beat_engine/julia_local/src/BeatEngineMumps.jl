@@ -21,10 +21,16 @@ version string (which sits past every array in the struct) is read back after `J
 
 BLAS: `MUMPS_seq_jll` links `libblastrampoline` and calls the LP64 (32-bit integer) BLAS
 interface, which Julia's default configuration does not populate (ILP64 OpenBLAS only). The
-loader forwards `OpenBLAS32_jll` into the LP64 slots without clearing Julia's ILP64 backend, and
-sets that library's thread pool directly before each MUMPS call, so `BLAB_MUMPS_THREADS` does
-not change the thread count of Julia's own dense LU. The sequential MUMPS build has no OpenMP;
-its parallelism is the BLAS inside the frontal factorization.
+loader forwards an LP64 BLAS into those slots without clearing Julia's ILP64 backend, so Julia's
+own dense algebra keeps its library and thread count. `BLAB_MUMPS_BLAS` picks it: `auto` (the
+default) fills the LP64 table from `OpenBLAS32_jll` and then, on Apple Silicon, points the
+double-precision symbols that Accelerate's LP64 "new LAPACK" interface provides
+(`<name>\$NEWLAPACK`, macOS 13.3+) at it -- never Accelerate's legacy entry points; `openblas`
+stops after the first step, and `accelerate` refuses (UMFPACK fallback) if Accelerate's entry
+points are missing. The loader sets OpenBLAS32's thread pool before each MUMPS call
+(`BLAB_MUMPS_THREADS`), which covers whatever Accelerate does not replace; Accelerate schedules
+its own threads. The sequential MUMPS build has no OpenMP; its parallelism is the BLAS inside the
+frontal factorization.
 """
 module BeatEngineMumps
 
@@ -179,6 +185,8 @@ struct MumpsLibrary
     zmumps_c::Ptr{Cvoid}
     set_blas_threads::Ptr{Cvoid}
     version::String
+    # The LP64 BLAS MUMPS calls: "accelerate" or "openblas".
+    blas::String
 end
 
 const LIBRARY = Ref{Union{Nothing,MumpsLibrary}}(nothing)
@@ -188,6 +196,32 @@ const FORCE_UNAVAILABLE = Ref(false)
 #: Live solvers, released at process exit if their owner did not release them.
 const LIVE_SOLVERS = WeakKeyDict{Any,Nothing}()
 const ATEXIT_REGISTERED = Ref(false)
+
+# Function pointers and native factors from a precompile process must never
+# survive in a package image. The next mumps_library() reloads/self-tests and
+# forwards LP64 BLAS in the new process; libblastrampoline's native tables are
+# not Julia image data. Release solvers before dropping their library pointers.
+function reset_precompile_state!()
+    for solver in collect(keys(LIVE_SOLVERS))
+        try
+            mumps_release!(solver)
+        catch exception
+            @warn "BEAT MUMPS precompile cleanup failed" exception=(exception, catch_backtrace())
+        end
+    end
+    empty!(LIVE_SOLVERS)
+    LIBRARY[] = nothing
+    ATEXIT_REGISTERED[] = false
+    return nothing
+end
+
+function __init__()
+    # Normally already empty after the workload. Do not call any serialized
+    # pointer at load time, even if a workload terminated before its cleanup.
+    empty!(LIVE_SOLVERS)
+    LIBRARY[] = nothing
+    ATEXIT_REGISTERED[] = false
+end
 
 """`BLAB_MUMPS_THREADS`, default 4: the LP64 OpenBLAS pool size used inside MUMPS calls."""
 function mumps_threads()
@@ -199,7 +233,7 @@ function mumps_threads()
 end
 
 function _unavailable(reason)
-    return MumpsLibrary(false, reason, C_NULL, C_NULL, "")
+    return MumpsLibrary(false, reason, C_NULL, C_NULL, "", "")
 end
 
 """
@@ -240,25 +274,101 @@ function _load_library()
     mumps_path = Base.invokelatest(getproperty, mumps_module, :libzmumps_path)
     openblas_path = Base.invokelatest(getproperty, openblas_module, :libopenblas_path)
 
-    config = BLAS.get_config()
-    if !any(library -> library.interface == :lp64, config.loaded_libs)
-        BLAS.lbt_forward(openblas_path; clear=false)
-        any(library -> library.interface == :lp64, BLAS.get_config().loaded_libs) ||
-            return _unavailable("could not forward an LP64 BLAS for MUMPS")
-    end
-    openblas_handle = Libdl.dlopen(openblas_path)
-    set_threads = Libdl.dlsym_e(openblas_handle, :openblas_set_num_threads)
+    blas = _forward_lp64_blas(openblas_path)
+    isnothing(blas) && return _unavailable("could not forward an LP64 BLAS for MUMPS")
+    # OpenBLAS32 backs every symbol Accelerate does not replace, so its pool is sized either way.
+    set_threads = Libdl.dlsym_e(Libdl.dlopen(openblas_path), :openblas_set_num_threads)
     mumps_handle = Libdl.dlopen(mumps_path)
     zmumps_c = Libdl.dlsym(mumps_handle, :zmumps_c)
 
-    library = MumpsLibrary(true, "", zmumps_c, set_threads, "")
+    library = MumpsLibrary(true, "", zmumps_c, set_threads, "", blas)
     version, error_message = _self_test(library)
+    if !isempty(error_message) && blas == "accelerate" && mumps_blas_preference() == "auto"
+        # Put the whole LP64 table back on OpenBLAS32 and test again.
+        ACCELERATE_SELF_TEST_FALLBACK[] = "Accelerate self-test failed: " * error_message
+        @warn "MUMPS on Accelerate failed its self-test; using OpenBLAS32" error_message
+        BLAS.lbt_forward(openblas_path; clear=false)
+        blas = _lp64_blas_in_use()
+        library = MumpsLibrary(true, "", zmumps_c, set_threads, "", blas)
+        version, error_message = _self_test(library)
+    end
     isempty(error_message) || return _unavailable("self-test failed: " * error_message)
     if !ATEXIT_REGISTERED[]
         atexit(_release_live_solvers)
         ATEXIT_REGISTERED[] = true
     end
-    return MumpsLibrary(true, "", zmumps_c, set_threads, version)
+    return MumpsLibrary(true, "", zmumps_c, set_threads, version, blas)
+end
+
+const ACCELERATE_FRAMEWORK = "/System/Library/Frameworks/Accelerate.framework/Accelerate"
+# Why `auto` left Accelerate after selecting it (its self-test failed), or empty.
+const ACCELERATE_SELF_TEST_FALLBACK = Ref("")
+
+"""`BLAB_MUMPS_BLAS`: `auto` (default), `accelerate` or `openblas`."""
+function mumps_blas_preference()
+    raw = lowercase(strip(get(ENV, "BLAB_MUMPS_BLAS", "auto")))
+    raw in ("auto", "accelerate", "openblas") ||
+        error("Unsupported BLAB_MUMPS_BLAS value: $raw. Expected auto, accelerate, or openblas.")
+    return raw
+end
+
+_has_lp64_provider() = any(library -> library.interface == :lp64, BLAS.get_config().loaded_libs)
+
+# Which BLAS the LP64 slots MUMPS calls hold: "accelerate" when `zgemm_` and `zgetrf_` forward to
+# Accelerate's `$NEWLAPACK` entry points, else "openblas".
+function _lp64_blas_in_use()
+    handle = Libdl.dlopen(ACCELERATE_FRAMEWORK; throw_error=false)
+    handle === nothing && return "openblas"
+    on_accelerate(name) = BLAS.lbt_get_forward(name * "_", :lp64) ==
+                          something(Libdl.dlsym(handle, name * "\$NEWLAPACK"; throw_error=false), C_NULL)
+    return on_accelerate("zgemm") && on_accelerate("zgetrf") ? "accelerate" : "openblas"
+end
+
+# Symbols taken from Accelerate: double-precision real and complex routines (ZMUMPS calls only
+# these) that return nothing or a real/integer value. Functions returning a complex value
+# (`zdotc_`, `zdotu_`, `zladiv_`) follow a different return convention in Accelerate's new
+# interface, and single-precision real functions have their own float-return conventions, so
+# those slots keep OpenBLAS32 rather than risk an ABI mismatch.
+const ACCELERATE_COMPLEX_RETURNING = Set(["zdotc_", "zdotu_", "zladiv_"])
+_accelerate_forwardable(name) = endswith(name, "_") && !isempty(name) &&
+                                (name[1] == 'd' || name[1] == 'z') && !(name in ACCELERATE_COMPLEX_RETURNING)
+
+# Point every forwardable LP64 slot that has an Accelerate "new LAPACK" entry point
+# (`<name>$NEWLAPACK`, LP64, macOS 13.3+) at it, and return how many; slots without one keep what
+# they hold. This sets symbols one by one rather than calling `lbt_forward` on Accelerate: that
+# call autodetects an empty suffix and forwards the legacy entry points, which are not safe under
+# concurrent calls. The forwarded routines return nothing or a real/integer value, so the plain
+# return convention applies.
+function _forward_accelerate_new_lapack!()
+    handle = Libdl.dlopen(ACCELERATE_FRAMEWORK; throw_error=false)
+    handle === nothing && return 0
+    count = 0
+    for name in BLAS.lbt_get_config().exported_symbols
+        _accelerate_forwardable(name) || continue
+        address = Libdl.dlsym(handle, chop(name) * "\$NEWLAPACK"; throw_error=false)
+        address === nothing && continue
+        BLAS.lbt_set_forward(name, address, :lp64, :normal, :plain)
+        count += 1
+    end
+    return count
+end
+
+# Populate libblastrampoline's LP64 slots for MUMPS and say with what, or `nothing`. Julia's
+# ILP64 slots are left alone. OpenBLAS32 fills the whole LP64 table first, so a symbol Accelerate
+# lacks still has a backing library; Accelerate's new-LAPACK entry points then replace what they
+# cover. The table is rebuilt even if something else populated LP64 slots earlier, so a
+# preference or a forbidden legacy entry point never survives from before; `mumps_library()`
+# caches its result, so this runs once per process.
+function _forward_lp64_blas(openblas_path)
+    preference = mumps_blas_preference()
+    BLAS.lbt_forward(openblas_path; clear=false)
+    _has_lp64_provider() || return nothing
+    if preference != "openblas" && Sys.isapple() && Sys.ARCH === :aarch64
+        _forward_accelerate_new_lapack!()
+    end
+    blas = _lp64_blas_in_use()
+    preference == "accelerate" && blas != "accelerate" && return nothing
+    return blas
 end
 
 function _release_live_solvers()
