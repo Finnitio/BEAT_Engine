@@ -11,6 +11,19 @@ kernels. `BLAB_BEAT_CPU_REGULAR_KERNEL` selects it; the default is `simd`.
 Each frequency's source-request diagnostics report `cpu_regular_kernel` (`null`
 on every other backend).
 
+## Regular quadrature mode
+
+CPU source-request and compiled exterior solves default to
+`regular_quadrature_mode = "fixed"`: every frequency uses the base
+`quadrature_order`, which defaults to 4 (six points per triangle), as on the
+accelerator backends. The previous wavelength default chose one rule for the
+whole mesh from `k * sqrt(p90 element area)`, using order 2 (three points) up to
+2.0 and the base order above it. On graded meshes, many tiny elements can hide
+coarse elements from that statistic and produce inaccurate high-frequency
+directivity. `"wavelength"` is now an explicit CPU opt-in and is unsafe on graded
+meshes; its existing statistics and cutoffs are unchanged. Coupled condensed
+solves already default to fixed mode and keep their existing base-order defaults.
+
 ## What it changes, and what it cannot
 
 Only the CPU source-request driver (`BeatEngineDriver.jl`) selects it, for both
