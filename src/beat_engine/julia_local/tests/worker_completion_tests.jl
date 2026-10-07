@@ -1,4 +1,6 @@
 using Test
+isdefined(@__MODULE__, :BeatEngineWorkerCleanup) ||
+    include(joinpath(@__DIR__, "..", "src", "BeatEngineWorkerCleanup.jl"))
 using .BeatEngineWorkerCleanup
 
 struct WorkerCompletionTestIO <: IO
@@ -63,4 +65,18 @@ end
     reclaim = () -> (reclaimed[] = true)
     @test_throws ErrorException finish_aggressive_solve!(1, emit, reclaim; output=IOBuffer())
     @test !reclaimed[]
+end
+
+struct WorkerCompletionBrokenIO <: IO end
+Base.write(::WorkerCompletionBrokenIO, ::UInt8) = error("synthetic closed stderr")
+Base.unsafe_write(::WorkerCompletionBrokenIO, ::Ptr{UInt8}, ::UInt) = error("synthetic closed stderr")
+Base.flush(::WorkerCompletionBrokenIO) = error("synthetic closed stderr")
+
+@testset "Unwritable diagnostic after completion is not a terminal failure" begin
+    output = IOBuffer()
+    emit = event -> println(output, event["type"])
+    reclaim = () -> error("synthetic reclaim failure")
+    @test finish_aggressive_solve!(1, emit, reclaim; output=output,
+        error_output=WorkerCompletionBrokenIO()) === nothing
+    @test String(take!(output)) == "completed\n"
 end

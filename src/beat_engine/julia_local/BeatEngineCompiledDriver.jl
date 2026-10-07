@@ -4146,7 +4146,7 @@ function run_worker()
                 requests_since_cleanup += 1
                 reason = cleanup_reason(cleanup, requests_since_cleanup;
                     cancelled=outcome.cancelled, free_fraction=free_fraction)
-                if cleanup.policy == "aggressive" && !outcome.cancelled
+                if reason == "aggressive"
                     finish_aggressive_solve!(outcome.solved_count,
                         event -> println(JSON.json(event)), reclaim_accelerator_memory!)
                     requests_since_cleanup = 0

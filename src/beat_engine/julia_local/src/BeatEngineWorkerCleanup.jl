@@ -42,9 +42,13 @@ function finish_aggressive_solve!(solved_count, emit, reclaim; output=stdout, er
     try
         reclaim()
     catch exception
-        # Completion is already visible to the client; never emit another terminal event.
-        println(error_output, "Post-solve reclamation failed: ", sprint(showerror, exception))
-        flush(error_output)
+        # Completion is already visible to the client; never emit another
+        # terminal event, even if the diagnostic itself cannot be written.
+        try
+            println(error_output, "Post-solve reclamation failed: ", sprint(showerror, exception))
+            flush(error_output)
+        catch
+        end
     end
     return nothing
 end
