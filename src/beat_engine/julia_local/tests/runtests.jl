@@ -8,6 +8,7 @@ include(joinpath(@__DIR__, "worker_cleanup_tests.jl"))
 include(joinpath(@__DIR__, "deploy_rhs_policy_tests.jl"))
 include(joinpath(@__DIR__, "exterior_rhs_policy_tests.jl"))
 include(joinpath(@__DIR__, "fixture_integrity_tests.jl"))
+include(joinpath(@__DIR__, "regular_quadrature_default_tests.jl"))
 
 include(joinpath(@__DIR__, "..", "src", "BeatEngineCore.jl"))
 using .BeatEngineCore

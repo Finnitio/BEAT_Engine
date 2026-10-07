@@ -54,6 +54,16 @@ Read [the compiled-system contract](docs/BEAT%20Compiled%20System%20Contract.md)
 [provenance format](docs/BEAT%20Run%20Provenance.md).
 Rapid, subsequent CUDA solves can have memory cleanup policies applied via [bounded worker cleanup reuse](docs/WorkerCleanup.md).
 
+CPU source-request and compiled exterior solves default to
+`regular_quadrature_mode = "fixed"`, using the base `quadrature_order` (default
+4, six points per triangle), matching accelerator regular quadrature. A single
+mesh-wide wavelength rule can underestimate the quadrature needed by coarse
+elements when many small elements dominate the mesh statistic, causing inaccurate
+high-frequency directivity. `"wavelength"` remains an explicit CPU opt-in and is
+unsafe on graded meshes. Existing base-order overrides and wavelength cutoffs are
+unchanged. Coupled condensed solves already default to fixed mode and keep their
+existing base-order defaults.
+
 ## Tests and releases
 
 ```text
