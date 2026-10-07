@@ -943,6 +943,35 @@ end
 
 release_exterior_metal_system(produced) = release_metal_burton_miller_system!(produced.system)
 
+function validate_interface_observation_points(points)
+    (!isempty(points) && all(point -> point isa AbstractVector && length(point) == 3 &&
+        all(value -> value isa Real && !(value isa Bool) && isfinite(value), point), points)) ||
+        error("Interface radiation requires finite observation points with shape (point, 3).")
+    return nothing
+end
+
+# Specialize on the requested precision before converting JSON's Vector{Any}.
+# Retain the original broadcast and SVector construction so rounding and shape
+# errors are unchanged. Request validation already checks finite JSON values;
+# use its path and message here too when this parser is called independently.
+function parse_field_output_points(outputs, ::Type{T}) where {T<:AbstractFloat}
+    points_by_output = Dict{String,Vector{SVector{3,T}}}()
+    for (output_index, output) in enumerate(outputs)
+        quantity = String(output["quantity"])
+        quantity in ("exterior_pressure", "interface_radiated_pressure") || continue
+        raw_points = get(get(output, "options", Dict{String,Any}()), "points_m", Any[])
+        BeatEngineContract.finite_json(raw_points, "request.outputs[$(output_index - 1)].options.points_m")
+        if quantity == "interface_radiated_pressure"
+            validate_interface_observation_points(raw_points)
+        else
+            isempty(raw_points) && error("exterior_pressure output requires options.points_m.")
+        end
+        points_by_output[String(output["id"])] =
+            SVector{3,T}[SVector{3,T}(T.(point)) for point in raw_points]
+    end
+    return points_by_output
+end
+
 function solve_exterior_request(request, system, unbounded_region; event_mode=false)
     meshes = system["meshes"]
     boundaries = system["boundaries"]
@@ -986,6 +1015,8 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
     sound_speed > zero(FloatType) && density > zero(FloatType) || error(
         "Exterior sound speed and density must be positive.",
     )
+    outputs = get(request, "outputs", Any[])
+    field_points_by_output = parse_field_output_points(outputs, FloatType)
     mesh_setup_started = time_ns()
     bem_domain = aggregate_bem_region(meshes, unbounded_region, boundaries, FloatType)
     mesh = snap_symmetry_planes(bem_domain.mesh, symmetry_mode)
@@ -1087,7 +1118,6 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
     identity_cache = Dict{Int,Any}(base_order => (identity_p1_p1, identity_p1_dp0))
     cpu_field_cache_by_order = Dict{Int,Any}(base_order => cpu_field_cache)
     cpu_assembly_cache_by_order = Dict{Int,Any}()
-    outputs = get(request, "outputs", Any[])
     cancel_path = get(request, "cancel_path", nothing)
     cancel_requested() = cancel_path !== nothing && isfile(String(cancel_path))
     solved_count = 0
@@ -1305,9 +1335,7 @@ function solve_exterior_request(request, system, unbounded_region; event_mode=fa
                 quantity = String(output["quantity"])
                 if quantity == "exterior_pressure"
                     field_started = time_ns()
-                    raw_points = get(get(output, "options", Dict{String,Any}()), "points_m", Any[])
-                    isempty(raw_points) && error("exterior_pressure output requires options.points_m.")
-                    points = [SVector{3,FloatType}(FloatType.(point)) for point in raw_points]
+                    points = field_points_by_output[String(output["id"])]
                     values = [
                         exterior_field(
                             points,
@@ -2613,9 +2641,7 @@ function solve_request_impl(request; event_mode=false)
             (!isempty(interfaces) && !isempty(bounded_regions) && !isempty(unbounded_regions)) ||
                 error("Interface radiation requires a coupled system with FEM-BEM interfaces.")
             points = get(get(output, "options", Dict{String,Any}()), "points_m", Any[])
-            (!isempty(points) && all(point -> point isa AbstractVector && length(point) == 3 &&
-                all(value -> value isa Real && !(value isa Bool) && isfinite(value), point), points)) ||
-                error("Interface radiation requires finite observation points with shape (point, 3).")
+            validate_interface_observation_points(points)
         end
     end
     isempty(unbounded_regions) && return solve_interior_request(
@@ -2675,6 +2701,8 @@ function solve_request_impl(request; event_mode=false)
     isfinite(transducer_reference_voltage_v) && transducer_reference_voltage_v > zero(FloatType) || error(
         "transducer_reference_voltage_v must be finite and positive.",
     )
+    outputs = get(request, "outputs", Any[])
+    field_points_by_output = parse_field_output_points(outputs, FloatType)
     mesh_setup_started = time_ns()
     fem_domains = aggregate_fem_domains(
         meshes,
@@ -2979,7 +3007,6 @@ function solve_request_impl(request; event_mode=false)
         end
         cache_setup_s = (time_ns() - cache_setup_started) / 1.0e9
     end
-    outputs = get(request, "outputs", Any[])
     rom_requested = any(
         String(output["quantity"]) in SPEAKER_ROM_QUANTITIES for output in outputs
     )
@@ -3325,8 +3352,7 @@ function solve_request_impl(request; event_mode=false)
                     field_started = time_ns()
                     options = get(output, "options", Dict{String,Any}())
                     raw_points = get(options, "points_m", Any[])
-                    isempty(raw_points) && error("interface_radiated_pressure requires points_m.")
-                    points = [SVector{3,FloatType}(FloatType.(point)) for point in raw_points]
+                    points = field_points_by_output[String(output["id"])]
                     ids = [String(interface["id"]) for interface in interfaces]
                     names = [String(get(interface, "name", interface["id"])) for interface in interfaces]
                     if radiation_has_other
@@ -3358,9 +3384,7 @@ function solve_request_impl(request; event_mode=false)
                 elseif quantity == "exterior_pressure"
                     field_started = time_ns()
                     options = get(output, "options", Dict{String,Any}())
-                    raw_points = get(options, "points_m", Any[])
-                    isempty(raw_points) && error("exterior_pressure output requires options.points_m.")
-                    points = [SVector{3,FloatType}(FloatType.(point)) for point in raw_points]
+                    points = field_points_by_output[String(output["id"])]
                     raw_weight_sweep = get(options, "excitation_weights_sweep", Any[])
                     if !isempty(raw_weight_sweep)
                         length(raw_weight_sweep) == length(request["frequencies_hz"]) || error(

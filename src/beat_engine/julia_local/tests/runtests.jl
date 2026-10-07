@@ -1,6 +1,7 @@
 include(joinpath(@__DIR__, "deploy_cpu_tests.jl"))
 include(joinpath(@__DIR__, "compiled_workload_tests.jl"))
 include(joinpath(@__DIR__, "compiled_driver_closure_tests.jl"))
+include(joinpath(@__DIR__, "field_output_points_tests.jl"))
 include(joinpath(@__DIR__, "regular_quadrature_default_tests.jl"))
 using Test
 using StaticArrays
