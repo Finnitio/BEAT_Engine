@@ -4146,6 +4146,12 @@ function run_worker()
                 requests_since_cleanup += 1
                 reason = cleanup_reason(cleanup, requests_since_cleanup;
                     cancelled=outcome.cancelled, free_fraction=free_fraction)
+                if cleanup.policy == "aggressive" && !outcome.cancelled
+                    finish_aggressive_solve!(outcome.solved_count,
+                        event -> println(JSON.json(event)), reclaim_accelerator_memory!)
+                    requests_since_cleanup = 0
+                    continue
+                end
                 if reason == "reuse"
                     # Release request-owned field caches, retaining allocator/library
                     # caches. CUDA's allocation-pressure reclamation remains enabled.

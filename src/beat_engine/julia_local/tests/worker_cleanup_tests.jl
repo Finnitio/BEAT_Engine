@@ -25,3 +25,5 @@ using .BeatEngineWorkerCleanup
     @test_throws ErrorException cleanup_options(Dict("worker_cleanup" => Dict("policy" => "typo")))
     @test_throws ErrorException cleanup_options(Dict("worker_cleanup" => Dict("unexpected" => 1)))
 end
+
+include(joinpath(@__DIR__, "worker_completion_tests.jl"))

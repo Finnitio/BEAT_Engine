@@ -1,6 +1,6 @@
 module BeatEngineWorkerCleanup
 
-export cleanup_options, cleanup_reason
+export cleanup_options, cleanup_reason, finish_aggressive_solve!
 
 """Request-local opt-in. Absence preserves the historical worker behavior."""
 function cleanup_options(options)
@@ -33,6 +33,20 @@ function cleanup_reason(options, count; cancelled=false, free_fraction=nothing)
     (free_fraction === nothing || !isfinite(free_fraction)) && return "memory_unknown"
     free_fraction <= options.min_free_fraction && return "memory_pressure"
     return "reuse"
+end
+
+"""Emit and flush successful completion before reclaiming on the aggressive path."""
+function finish_aggressive_solve!(solved_count, emit, reclaim; output=stdout, error_output=stderr)
+    emit(Dict{String,Any}("type" => "completed", "solved_count" => solved_count))
+    flush(output)
+    try
+        reclaim()
+    catch exception
+        # Completion is already visible to the client; never emit another terminal event.
+        println(error_output, "Post-solve reclamation failed: ", sprint(showerror, exception))
+        flush(error_output)
+    end
+    return nothing
 end
 
 end

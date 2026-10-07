@@ -48,9 +48,16 @@ solving and use the existing failure cleanup path.
 Opted-in terminal solve events include `worker_cleanup` diagnostics:
 `policy`, `reason` (`reuse`, `interval`, `memory_pressure`, `memory_unknown`, or
 `cancelled`), `requests_since_cleanup`, `free_fraction_before`, and `seconds`.
-The completion event still follows cleanup; clients need no new event sequencing.
+These opted-in completion events still follow cleanup; clients need no new event sequencing.
 
-Run the standalone decision tests with:
+For a successful solve using the default aggressive policy, the worker prints and
+flushes `completed` with `solved_count` before reclaiming memory. It finishes
+reclamation before reading the next request. If reclamation throws after completion,
+the worker logs the error to stderr and continues without another terminal event.
+CUDA reuse and cancellation events still follow cleanup, and failed requests still
+reclaim memory before reporting failure.
+
+Run the standalone cleanup decision and completion ordering tests with:
 
 ```powershell
 julia src/beat_engine/julia_local/tests/worker_cleanup_tests.jl
