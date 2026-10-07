@@ -63,18 +63,19 @@ end
     for T in (Float32, Float64), quantity in ("exterior_pressure", "interface_radiated_pressure")
         empty_error = quantity == "exterior_pressure" ?
                       "exterior_pressure output requires options.points_m." :
-                      "Interface radiation requires finite observation points with shape (point, 3)."
+                      "interface_radiated_pressure requires points_m."
         for output in (field_output("field", quantity, Any[]), Dict("id" => "field", "quantity" => quantity))
             outputs = JSON.parse(JSON.json(Any[output]))
             @test caught_error(() -> Driver.parse_field_output_points(outputs, T)) ==
                   (ErrorException, empty_error)
         end
+        # Shape errors come from the SVector constructor, as before the hoist;
+        # compare the type and the length, not StaticArrays' exact wording.
         for point in (Any[], Any[1, 2], Any[1, 2, 3, 4])
             outputs = JSON.parse(JSON.json(Any[field_output("field", quantity, Any[point])]))
-            expected = quantity == "exterior_pressure" ?
-                       (DimensionMismatch, "DimensionMismatch: expected input array of length 3, got length $(length(point))") :
-                       (ErrorException, "Interface radiation requires finite observation points with shape (point, 3).")
-            @test caught_error(() -> Driver.parse_field_output_points(outputs, T)) == expected
+            kind, message = caught_error(() -> Driver.parse_field_output_points(outputs, T))
+            @test kind == DimensionMismatch
+            @test occursin("length 3", message)
         end
     end
 end

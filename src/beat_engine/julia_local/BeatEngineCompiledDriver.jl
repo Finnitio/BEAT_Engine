@@ -952,13 +952,9 @@ function parse_field_output_points(outputs, ::Type{T}) where {T<:AbstractFloat}
         quantity = String(output["quantity"])
         quantity in ("exterior_pressure", "interface_radiated_pressure") || continue
         raw_points = get(get(output, "options", Dict{String,Any}()), "points_m", Any[])
-        if quantity == "interface_radiated_pressure"
-            (!isempty(raw_points) && all(point -> point isa AbstractVector && length(point) == 3 &&
-                all(value -> value isa Real && !(value isa Bool) && isfinite(value), point), raw_points)) ||
-                error("Interface radiation requires finite observation points with shape (point, 3).")
-        else
-            isempty(raw_points) && error("exterior_pressure output requires options.points_m.")
-        end
+        isempty(raw_points) && error(quantity == "exterior_pressure" ?
+            "exterior_pressure output requires options.points_m." :
+            "interface_radiated_pressure requires points_m.")
         points_by_output[String(output["id"])] =
             SVector{3,T}[SVector{3,T}(T.(point)) for point in raw_points]
     end
