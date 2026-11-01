@@ -170,6 +170,16 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
         options = request
         default_precision = "float32"
         backend_name = str(options.get("bem_backend", "cpu")).lower()
+        quantity = request.get("field_quantity", "pressure")
+        if quantity != "pressure":
+            capabilities = info.get("field_quantities", {})
+            _require(isinstance(capabilities, dict), "invalid field_quantities announcement")
+            quantities = capabilities.get(backend_name, [])
+            _require(isinstance(quantities, list), "invalid field_quantities announcement")
+            _require(
+                quantity in quantities,
+                f"field quantity {quantity!r} is unavailable on {backend_name}; update the engine worker.",
+            )
     else:
         raise WorkerCompatibilityError(f"Unsupported client operation: {operation}")
     precision = str(options.get("precision", default_precision)).lower()

@@ -75,6 +75,16 @@ and compiled payload follow the [compiled-system contract](BEAT%20Compiled%20Sys
 Field binary filenames resolve against the field request's directory. All paths
 are local to the worker; this protocol does not provide remote asset transfer.
 
+Field requests default to `field_quantity: "pressure"`. CPU and CUDA workers also
+advertise `pressure_gradient_v1` in the per-backend `field_quantities` ready map.
+This quantity requires quadrature order 4 and returns a complex `(point, 4)` array:
+pressure followed by its observation-coordinate derivatives in X, Y, Z (Pa/m).
+Binary arrays use C row order and the result echoes `field_quantity`. Clients must
+check the capability before requesting gradients from an older worker.
+The gradient is differentiated analytically; near-panel quadrature is refined
+adaptively on the CPU for both backends. Samples on the boundary are unsupported.
+With positive-time phasors, velocity is `gradient / (-i * omega * density)`.
+
 Before submission the client checks the selected contract versions, operation,
 precision, solve kind, requested backend, and marker cancellation support when
 used. Interior FEM uses CPU; BEM backend selection applies to exterior and coupled

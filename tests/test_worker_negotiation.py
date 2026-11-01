@@ -85,6 +85,35 @@ def test_selects_current_formats_and_accepts_future_advertised_versions(ready, p
     assert negotiate_submission(ready, field, "bem_field") == {"protocol_version": 1, "field_array_schema_version": 1}
 
 
+def test_gradient_field_requires_explicit_backend_capability(ready):
+    field = {
+        "binary_array_schema_version": 1,
+        "bem_backend": "cpu",
+        "precision": "float64",
+        "field_quantity": "pressure_gradient_v1",
+    }
+    with pytest.raises(WorkerCompatibilityError, match="field quantity"):
+        negotiate_submission(ready, field, "bem_field")
+
+
+@pytest.mark.parametrize("capabilities", [None, [], "pressure_gradient_v1", {"cpu": "pressure_gradient_v1"}])
+def test_gradient_field_rejects_malformed_capabilities(ready, capabilities):
+    ready["field_quantities"] = capabilities
+    field = {
+        "binary_array_schema_version": 1,
+        "bem_backend": "cpu",
+        "precision": "float64",
+        "field_quantity": "pressure_gradient_v1",
+    }
+    with pytest.raises(WorkerCompatibilityError, match="invalid field_quantities"):
+        negotiate_submission(ready, field, "bem_field")
+    ready["field_quantities"] = {"cpu": ["pressure", "pressure_gradient_v1"]}
+    assert negotiate_submission(ready, field, "bem_field")["field_array_schema_version"] == 1
+    field["field_quantity"] = "future_gradient"
+    with pytest.raises(WorkerCompatibilityError, match="field quantity"):
+        negotiate_submission(ready, field, "bem_field")
+
+
 def test_axial_source_requires_explicit_worker_capability(ready, payload):
     source = payload["compiled_system"]["components"][0]
     payload["compiled_system"]["contract_version"] = 2
