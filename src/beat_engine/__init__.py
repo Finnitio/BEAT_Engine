@@ -4,7 +4,7 @@ from .backends import BackendInfo, backend_catalog, backend_info
 from .client import EngineWorker, WorkerPool
 from .paths import EnginePaths, engine_paths
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __all__ = [
     "BackendInfo",
     "backend_catalog",
