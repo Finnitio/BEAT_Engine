@@ -85,3 +85,59 @@ porous_test_properties(frequency; convention="exp(+i omega t)", material=POROUS_
         @test region_material_wire(parse_region_material(POROUS_TEST_JCA, Float64)) == POROUS_TEST_JCA
     end
 end
+
+@testset "JCAL with k0' = phi Lambda'^2 / 8 is JCA (Allard & Atalla Eqs. 5.54/5.55)" begin
+    phi, thermal_length = POROUS_TEST_JCA["porosity"], POROUS_TEST_JCA["thermal_characteristic_length_m"]
+    jcal = merge(POROUS_TEST_JCA, Dict{String,Any}("model" => "jcal",
+        "static_thermal_permeability_m2" => phi * thermal_length^2 / 8))
+    for frequency in (20.0, 700.0, 8000.0)
+        @test porous_test_properties(frequency; material=jcal).density ==
+              porous_test_properties(frequency).density
+        @test porous_test_properties(frequency; material=jcal).bulk_modulus ≈
+              porous_test_properties(frequency).bulk_modulus rtol=1e-14
+    end
+    # A measured k0' moves only the thermal (bulk modulus) transition, not the density.
+    measured = merge(jcal, Dict{String,Any}("static_thermal_permeability_m2" => 3 * phi * thermal_length^2 / 8))
+    @test porous_test_properties(700.0; material=measured).density == porous_test_properties(700.0).density
+    @test abs(porous_test_properties(700.0; material=measured).bulk_modulus /
+              porous_test_properties(700.0).bulk_modulus - 1) > 1e-3
+    # Lambda' < Lambda is unusual but admissible: the engine solves it (warnings are the client's job).
+    inverted = merge(jcal, Dict{String,Any}("thermal_characteristic_length_m" => 50e-6))
+    @test isfinite(porous_test_properties(700.0; material=inverted).bulk_modulus)
+    @test region_material_wire(parse_region_material(jcal, Float64)) == jcal
+    for k0 in (0.0, -1e-9)
+        @test_throws "Static thermal permeability must be positive" parse_region_material(
+            merge(jcal, Dict{String,Any}("static_thermal_permeability_m2" => k0)), Float64)
+    end
+end
+
+@testset "limp frame (Panneton, Allard & Atalla Eq. 11.55)" begin
+    rho0, phi = POROUS_TEST_AIR.density, POROUS_TEST_JCA["porosity"]
+    limp(rho1; base=POROUS_TEST_JCA) = merge(base, Dict{String,Any}("frame" => "limp", "frame_density_kg_per_m3" => rho1))
+    rho1 = 30.0
+    @testset "low frequency: the fibres move with the air, rho_limp -> rho_t = rho1 + phi rho0" begin
+        @test porous_test_properties(0.01; material=limp(rho1)).density ≈ rho1 + phi * rho0 rtol=1e-3
+    end
+    @testset "a heavy frame is the rigid frame" begin
+        for frequency in (50.0, 2000.0)
+            @test porous_test_properties(frequency; material=limp(1e12)).density ≈
+                  porous_test_properties(frequency).density rtol=1e-8
+        end
+    end
+    @testset "bulk modulus is the rigid frame's; losses stay passive and conjugate" begin
+        for frequency in (50.0, 2000.0)
+            positive = porous_test_properties(frequency; material=limp(rho1))
+            negative = porous_test_properties(frequency; material=limp(rho1), convention="exp(-i omega t)")
+            @test positive.bulk_modulus == porous_test_properties(frequency).bulk_modulus
+            @test imag(positive.density) < 0
+            @test negative.density ≈ conj(positive.density) rtol=1e-14
+        end
+    end
+    jcal = merge(POROUS_TEST_JCA, Dict{String,Any}("model" => "jcal", "static_thermal_permeability_m2" => 2e-9))
+    for material in (limp(rho1), limp(rho1; base=jcal))
+        @test region_material_wire(parse_region_material(material, Float64)) == material
+    end
+    for density in (0.0, -1.0)
+        @test_throws "Frame density must be positive" parse_region_material(limp(density), Float64)
+    end
+end

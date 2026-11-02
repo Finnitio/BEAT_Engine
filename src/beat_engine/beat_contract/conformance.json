@@ -5593,6 +5593,409 @@
         }
       ],
       "expected_message": "porous"
+    },
+    {
+      "name": "material: jcal rigid accepted",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jcal",
+            "frame": "rigid",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "static_thermal_permeability_m2": 2e-09
+          }
+        }
+      ]
+    },
+    {
+      "name": "material: jcal with thermal length below viscous length accepted",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jcal",
+            "frame": "rigid",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 5e-05,
+            "static_thermal_permeability_m2": 2e-09
+          }
+        }
+      ]
+    },
+    {
+      "name": "material: jcal without static_thermal_permeability_m2 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jcal",
+            "frame": "rigid",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018
+          }
+        }
+      ],
+      "expected_message": "static_thermal_permeability_m2"
+    },
+    {
+      "name": "material: jcal static_thermal_permeability_m2 0 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jcal",
+            "frame": "rigid",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "static_thermal_permeability_m2": 0
+          }
+        }
+      ],
+      "expected_message": "static_thermal_permeability_m2"
+    },
+    {
+      "name": "material: jcal textual static_thermal_permeability_m2 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jcal",
+            "frame": "rigid",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "static_thermal_permeability_m2": "1e-9"
+          }
+        }
+      ],
+      "expected_message": "static_thermal_permeability_m2"
+    },
+    {
+      "name": "material: jca static_thermal_permeability_m2 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jca",
+            "frame": "rigid",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "static_thermal_permeability_m2": 2e-09
+          }
+        }
+      ],
+      "expected_message": "static_thermal_permeability_m2"
+    },
+    {
+      "name": "material: jca limp accepted",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jca",
+            "frame": "limp",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "frame_density_kg_per_m3": 30.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "material: jcal limp accepted",
+      "valid": true,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jcal",
+            "frame": "limp",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "static_thermal_permeability_m2": 2e-09,
+            "frame_density_kg_per_m3": 30.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "material: limp without frame_density_kg_per_m3 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jca",
+            "frame": "limp",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018
+          }
+        }
+      ],
+      "expected_message": "frame_density_kg_per_m3"
+    },
+    {
+      "name": "material: limp frame_density_kg_per_m3 0 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jca",
+            "frame": "limp",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "frame_density_kg_per_m3": 0
+          }
+        }
+      ],
+      "expected_message": "frame_density_kg_per_m3"
+    },
+    {
+      "name": "material: limp boolean frame_density_kg_per_m3 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jca",
+            "frame": "limp",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "frame_density_kg_per_m3": true
+          }
+        }
+      ],
+      "expected_message": "frame_density_kg_per_m3"
+    },
+    {
+      "name": "material: rigid frame_density_kg_per_m3 rejected",
+      "valid": false,
+      "changes": [
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "kind"
+          ],
+          "value": "bounded_air"
+        },
+        {
+          "path": [
+            "compiled_system",
+            "regions",
+            0,
+            "loss_model"
+          ],
+          "value": {
+            "model": "jca",
+            "frame": "rigid",
+            "porosity": 0.98,
+            "flow_resistivity_pa_s_per_m2": 25000.0,
+            "tortuosity": 1.02,
+            "viscous_characteristic_length_m": 9e-05,
+            "thermal_characteristic_length_m": 0.00018,
+            "frame_density_kg_per_m3": 30.0
+          }
+        }
+      ],
+      "expected_message": "frame_density_kg_per_m3"
     }
   ]
 }
