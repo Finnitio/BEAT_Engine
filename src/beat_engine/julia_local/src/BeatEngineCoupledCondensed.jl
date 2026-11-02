@@ -361,8 +361,7 @@ widened copy of `fem_mesh`.
   a mesh or loss change made in place is picked up.
 """
 function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz, sound_speed, density)
-    # Callers may pass a partial cache; one without `fem_regions` is air-only.
-    fem_regions = get(prepared, :fem_regions, nothing)
+    fem_regions = prepared.fem_regions
     walls = [operator.matrix for operator in prepared.wall_impedance_operators]
     cached = !isnothing(store) && haskey(store, :matrices) &&
              store[:vertices] == fem_mesh.vertices && store[:tetrahedra] == fem_mesh.tetrahedra &&

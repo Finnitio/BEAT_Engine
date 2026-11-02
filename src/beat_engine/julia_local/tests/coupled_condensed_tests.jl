@@ -1623,6 +1623,7 @@ end
         bulk_loss_factor_by_vertex=loss,
         wall_impedance_operators=[(matrix=wall, thickness_m=0.02f0, flow_resistivity_pa_s_per_m2=12000f0)],
         thermoviscous_operator=nothing,
+        fem_regions=nothing,
     )
     store = Dict{Symbol,Any}()
     frequency, sound_speed, density = 20f0, 343f0, 1.21f0
@@ -1672,7 +1673,7 @@ end
     prepared.bulk_loss_factor_by_vertex[2] -= 0.01f0
     # Matrices with another element structure than the cached system are refused.
     wrong_structure = (stiffness=sparse(1.0f0 * I, vertex_count, vertex_count), bulk_loss_factor_by_vertex=loss,
-                       wall_impedance_operators=NamedTuple[], thermoviscous_operator=nothing)
+                       wall_impedance_operators=NamedTuple[], thermoviscous_operator=nothing, fem_regions=nothing)
     @test_throws "structure" BeatEngineCoupledCondensed._fem_system_float64(nothing, mesh32, wrong_structure, frequency, sound_speed, density)
 
     # Why: the air spring of a cavity with nothing retained, `Cᵀ A⁻¹ C` for a transducer surface load
@@ -1681,7 +1682,8 @@ end
     surface_load = assemble_boundary_mass_matrix(mesh64, radiator_faces, collect(1:vertex_count)) * ones(vertex_count)
     surface = SparseMatrixCSC{ComplexF64,Int}(reshape(ComplexF64.(surface_load), vertex_count, 1))
     air_spring(fem_system) = transpose(surface) * (lu(SparseMatrixCSC{ComplexF64,Int}(fem_system)) \ Matrix(surface))
-    lossless = (stiffness=stiffness32, bulk_loss_factor_by_vertex=zeros(Float32, vertex_count), wall_impedance_operators=NamedTuple[], thermoviscous_operator=nothing)
+    lossless = (stiffness=stiffness32, bulk_loss_factor_by_vertex=zeros(Float32, vertex_count), wall_impedance_operators=NamedTuple[], thermoviscous_operator=nothing,
+                fem_regions=nothing)
     reference = air_spring(assemble_fem_dynamic_stiffness(stiffness64, mass64, omega / Float64(sound_speed)))
     single = air_spring(SparseMatrixCSC{ComplexF64,Int}(
         assemble_fem_dynamic_stiffness(stiffness32, mass32, Float32(2pi) * frequency / sound_speed),
