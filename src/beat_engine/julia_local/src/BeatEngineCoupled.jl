@@ -41,6 +41,11 @@ export VolumeMesh,
     thermoviscous_coefficients,
     add_thermoviscous_terms,
     thermoviscous_diagnostics,
+    RegionMaterial,
+    parse_region_material,
+    region_material_wire,
+    is_porous,
+    equivalent_fluid_properties,
     miki_rigid_backed_surface_admittance,
     assemble_prescribed_velocity_load,
     sealed_cavity_modes,
@@ -711,6 +716,7 @@ function assemble_boundary_mass_matrix(
 end
 
 include("BeatEngineThermoviscous.jl")
+include("BeatEngineMaterials.jl")
 
 function assemble_prescribed_velocity_load(
     mesh::VolumeMesh{T},
