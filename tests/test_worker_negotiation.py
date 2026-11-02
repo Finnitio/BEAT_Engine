@@ -465,3 +465,20 @@ def test_porous_capability_accepts_advertised_values_and_rejects_invalid_handsha
     ready[capability] = MATERIAL_CAPABILITIES[capability]
     with pytest.raises(WorkerCompatibilityError, match=f"invalid {capability}"):
         negotiate_submission(ready, payload, "solve")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"model": "jcal", "static_thermal_permeability_m2": 2.0e-9},
+        {"frame": "limp", "frame_density_kg_per_m3": 30.0},
+    ],
+)
+def test_jcal_and_limp_need_their_own_capability_values(ready, payload, changes):
+    region = enable_porous_region(payload)
+    region["loss_model"].update(changes)
+    negotiate_submission(ready, payload, "solve")
+    ready["fem_region_material_models"] = ["air", "jca"]
+    ready["fem_region_material_frames"] = ["rigid"]
+    with pytest.raises(WorkerCompatibilityError, match="region material"):
+        negotiate_submission(ready, payload, "solve")

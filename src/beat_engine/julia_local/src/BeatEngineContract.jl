@@ -192,13 +192,17 @@ const POROUS_PARAMETERS = Dict(
     "tortuosity" => (1.0, nothing, true),
     "viscous_characteristic_length_m" => (0.0, nothing, false),
     "thermal_characteristic_length_m" => (0.0, nothing, false),
+    "static_thermal_permeability_m2" => (0.0, nothing, false),
+    "frame_density_kg_per_m3" => (0.0, nothing, false),
 )
+const JCA_PARAMETERS = ["porosity", "flow_resistivity_pa_s_per_m2", "tortuosity",
+                        "viscous_characteristic_length_m", "thermal_characteristic_length_m"]
 const REGION_MATERIAL_MODELS = Dict(
     "air" => String[],
-    "jca" => ["porosity", "flow_resistivity_pa_s_per_m2", "tortuosity",
-              "viscous_characteristic_length_m", "thermal_characteristic_length_m"],
+    "jca" => JCA_PARAMETERS,
+    "jcal" => [JCA_PARAMETERS; "static_thermal_permeability_m2"],
 )
-const REGION_MATERIAL_FRAMES = Dict("rigid" => String[])
+const REGION_MATERIAL_FRAMES = Dict("rigid" => String[], "limp" => ["frame_density_kg_per_m3"])
 const POROUS_BOUNDARY_KINDS = ("rigid", "moving", "interface", "unused")
 
 json_number(value) = value isa Real && !(value isa Bool)

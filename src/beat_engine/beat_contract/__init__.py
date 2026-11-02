@@ -217,9 +217,22 @@ _POROUS_PARAMETERS = {
     "tortuosity": (1.0, None, True),
     "viscous_characteristic_length_m": (0.0, None, False),
     "thermal_characteristic_length_m": (0.0, None, False),
+    "static_thermal_permeability_m2": (0.0, None, False),
+    "frame_density_kg_per_m3": (0.0, None, False),
 }
-REGION_MATERIAL_MODELS = {"air": (), "jca": tuple(_POROUS_PARAMETERS)}
-REGION_MATERIAL_FRAMES = {"rigid": ()}
+_JCA_PARAMETERS = (
+    "porosity",
+    "flow_resistivity_pa_s_per_m2",
+    "tortuosity",
+    "viscous_characteristic_length_m",
+    "thermal_characteristic_length_m",
+)
+REGION_MATERIAL_MODELS = {
+    "air": (),
+    "jca": _JCA_PARAMETERS,
+    "jcal": (*_JCA_PARAMETERS, "static_thermal_permeability_m2"),
+}
+REGION_MATERIAL_FRAMES = {"rigid": (), "limp": ("frame_density_kg_per_m3",)}
 _POROUS_BOUNDARY_KINDS = frozenset({"rigid", "moving", "interface", "unused"})
 
 
