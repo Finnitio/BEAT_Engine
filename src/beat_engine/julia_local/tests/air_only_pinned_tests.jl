@@ -2,8 +2,10 @@ module AirOnlyPinnedTests
 # Air-only requests must stay bit-identical to BEAT Engine v0.7.0 (c82bb7a) after the porous
 # region work: interior P1/P2 tubes and the tiny coupled FEM-BEM workload (condensed and
 # monolithic), each pinned to a SHA-256 of every output array produced by c82bb7a on the
-# reference machine (Linux x86_64, Julia 1.12, OpenBLAS, 2 threads).
-using Test, SHA
+# reference machine (Linux x86_64, Julia 1.12, OpenBLAS, 2 Julia and 2 BLAS threads). The coupled
+# dense solves depend on the BLAS thread count (1 differs from 2 or 4), and earlier test files
+# leave it changed, so the test sets it.
+using Test, SHA, LinearAlgebra
 const ENGINE_DIR = normpath(joinpath(@__DIR__, ".."))
 include(joinpath(ENGINE_DIR, "BeatEngineCompiledDriver.jl"))
 include(joinpath(ENGINE_DIR, "..", "julia_engine", "CompiledCoupledWorkload.jl"))
@@ -55,9 +57,15 @@ const AIR_ONLY_GOLDEN = Dict(
 )
 
 @testset "air-only outputs are bit-identical to v0.7.0 (c82bb7a)" begin
-    for (name, request) in air_only_pinned_requests()
-        digest = air_only_digest(solve_coupled_workload(request).results)
-        @test (name, digest) == (name, AIR_ONLY_GOLDEN[name])
+    blas_threads = BLAS.get_num_threads()
+    BLAS.set_num_threads(2)
+    try
+        for (name, request) in air_only_pinned_requests()
+            digest = air_only_digest(solve_coupled_workload(request).results)
+            @test (name, digest) == (name, AIR_ONLY_GOLDEN[name])
+        end
+    finally
+        BLAS.set_num_threads(blas_threads)
     end
 end
 
