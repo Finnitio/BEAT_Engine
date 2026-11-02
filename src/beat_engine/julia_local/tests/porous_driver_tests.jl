@@ -13,7 +13,16 @@ const SOFT_FIBROUS = Dict{String,Any}(
     "flow_resistivity_pa_s_per_m2" => 25000.0, "tortuosity" => 1.02,
     "viscous_characteristic_length_m" => 90e-6, "thermal_characteristic_length_m" => 180e-6)
 
-"""Analytical JCA (book form, e^{+j omega t}): Allard & Atalla Eqs. 5.50-5.55 with q0' = phi Lambda'^2/8."""
+# JCAL with a measured k0' (half of JCA's phi Lambda'^2/8 = 3.97e-9 m^2), and JCA with a limp
+# frame of light wadding (frame density from Table 11.2).
+const SOFT_FIBROUS_JCAL = merge(SOFT_FIBROUS, Dict{String,Any}("model" => "jcal", "static_thermal_permeability_m2" => 2e-9))
+const SOFT_FIBROUS_LIMP = merge(SOFT_FIBROUS, Dict{String,Any}("frame" => "limp", "frame_density_kg_per_m3" => 30.0))
+
+"""
+Analytical equivalent fluid (book form, e^{+j omega t}): Johnson density and simplified
+Lafarge bulk modulus, Allard & Atalla Eqs. 5.50-5.53, with q0' = k0' for JCAL and
+q0' = phi Lambda'^2/8 for JCA (Eqs. 5.54/5.55); a limp frame applies Eq. 11.55.
+"""
 function reference_jca(parameters, frequency; rho0=RHO0, c0=C0)
     j, omega = im, 2pi * frequency
     phi = parameters["porosity"]; sigma = parameters["flow_resistivity_pa_s_per_m2"]
@@ -25,10 +34,17 @@ function reference_jca(parameters, frequency; rho0=RHO0, c0=C0)
     p0 = rho0 * c0^2 / gamma
     rho = rho0 * alpha * (1 + sigma * phi / (j * omega * rho0 * alpha) *
           sqrt(1 + 4j * alpha^2 * eta * rho0 * omega / (sigma^2 * lambda_v^2 * phi^2)))
-    bulk = gamma * p0 / (gamma - (gamma - 1) /
-           (1 + 8eta / (j * lambda_t^2 * prandtl * omega * rho0) *
-            sqrt(1 + j * rho0 * omega * prandtl * lambda_t^2 / (16eta))))
-    return (density=rho / phi, bulk_modulus=bulk / phi)
+    q0_thermal = get(parameters, "static_thermal_permeability_m2", phi * lambda_t^2 / 8)
+    nu_thermal = eta / (rho0 * prandtl)
+    alpha_thermal = 1 + nu_thermal * phi / (j * omega * q0_thermal) *
+                    sqrt(1 + 4j * omega * q0_thermal^2 / (nu_thermal * lambda_t^2 * phi^2))
+    bulk = gamma * p0 / (gamma - (gamma - 1) / alpha_thermal)
+    rho_eq = rho / phi
+    if parameters["frame"] == "limp"
+        rho_t = parameters["frame_density_kg_per_m3"] + phi * rho0
+        rho_eq = (rho_t * rho_eq - rho0^2) / (rho_t + rho_eq - 2rho0)
+    end
+    return (density=rho_eq, bulk_modulus=bulk / phi)
 end
 
 """Input impedance of a rigidly closed tube of length L: Z = -j Z_c cot(k_c L) (e^{+j omega t})."""
@@ -134,6 +150,34 @@ input_impedance(p, excitation, inlet, offset) = -sum(p[excitation, offset .+ inl
         # Stated tolerance: 0.05 % relative impedance error with 1.25 mm P1 slabs (about 80
         # elements per porous wavelength, 99 mm at 2 kHz; measured 1.7e-4), and second-order
         # convergence under refinement (measured ratio 4.0).
+        @test maximum(errors[80]) < 5e-4
+        @test all(errors[80] .< errors[40] ./ 3)
+    end
+end
+
+@testset "JCAL and JCA+limp filled tubes: input impedance against -j Zc cot(kc L)" begin
+    length_m, frequencies = 0.1, (100.0, 500.0, 1000.0, 2000.0)
+    materials = (SOFT_FIBROUS_JCAL, SOFT_FIBROUS_LIMP)
+    for convention in ("exp(+i omega t)", "exp(-i omega t)")
+        errors = Dict{Int,Matrix{Float64}}()
+        for slabs in (40, 80)
+            request, inlets = tube_request(((m, slabs, length_m) for m in materials)...; frequencies, convention)
+            run = solve_coupled_workload(request)
+            @test !run.outcome.cancelled && length(run.results) == length(frequencies)
+            errors[slabs] = [begin
+                p, offsets = pressures(result)
+                fluid = reference_jca(material, frequency)
+                expected = reference_tube_impedance(fluid.density, fluid.bulk_modulus, frequency, length_m; convention)
+                abs(input_impedance(p, tube, inlets[tube], offsets[tube]) - expected) / abs(expected)
+            end for (frequency, result) in zip(frequencies, run.results), (tube, material) in enumerate(materials)]
+            diagnostics = last(run.results)["diagnostics"]["fem_region_materials"]
+            @test [entry["material"] for entry in diagnostics] == collect(materials)
+            fluid = reference_jca(SOFT_FIBROUS_LIMP, last(frequencies))
+            @test complex(diagnostics[2]["equivalent_density_kg_per_m3"]...) ≈
+                  (convention == "exp(+i omega t)" ? fluid.density : conj(fluid.density)) rtol=1e-12
+        end
+        # Same mesh and tolerance as the JCA tube (measured 1.8e-4 JCAL, 1.7e-4 limp; ratio 4.0).
+        # The references differ from rigid JCA by 1.4-4.4 % (JCAL) and 2.9-36 % (limp) here.
         @test maximum(errors[80]) < 5e-4
         @test all(errors[80] .< errors[40] ./ 3)
     end

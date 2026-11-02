@@ -80,9 +80,11 @@
   ],
   "fem_region_material_models": [
     "air",
-    "jca"
+    "jca",
+    "jcal"
   ],
   "fem_region_material_frames": [
-    "rigid"
+    "rigid",
+    "limp"
   ]
 }
