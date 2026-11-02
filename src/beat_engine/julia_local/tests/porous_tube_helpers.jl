@@ -1,9 +1,10 @@
 # Filled-tube fixture for the porous convergence study: a P1 or P2 tube, a compiled request
 # with a piston and a rigid end, and the analytical input impedance. Included by
 # porous_driver_tests.jl, porous_convergence_tests.jl and scripts/porous_convergence_study.jl;
-# it expects BeatEngineCompiledDriver.jl and CompiledCoupledWorkload.jl to be included first.
+# it includes porous_reference.jl and expects BeatEngineCompiledDriver.jl and
+# CompiledCoupledWorkload.jl to be included first.
 
-const TUBE_RHO0, TUBE_C0 = 1.21, 343.0
+include(joinpath(@__DIR__, "porous_reference.jl"))
 
 # Rigid-frame JCA parameters of the spec's two study presets (Allard & Atalla 2nd ed.).
 const SOFT_FOAM = Dict{String,Any}(  # Table 11.5
@@ -15,38 +16,15 @@ const GLASS_WOOL = Dict{String,Any}(  # Table 11.8
     "flow_resistivity_pa_s_per_m2" => 40000.0, "tortuosity" => 1.06,
     "viscous_characteristic_length_m" => 56e-6, "thermal_characteristic_length_m" => 110e-6)
 
-"""
-Analytical rigid-frame JCA equivalent fluid in book form (e^{+j omega t}), written
-independently of the engine: Allard & Atalla Eqs. 5.50-5.53 with q0' = phi Lambda'^2/8.
-"""
-function tube_reference_jca(parameters, frequency; rho0=TUBE_RHO0, c0=TUBE_C0)
-    j, omega = im, 2pi * frequency
-    phi = parameters["porosity"]; sigma = parameters["flow_resistivity_pa_s_per_m2"]
-    alpha = parameters["tortuosity"]
-    lambda_v = parameters["viscous_characteristic_length_m"]
-    lambda_t = parameters["thermal_characteristic_length_m"]
-    eta, gamma = 1.84e-5, 1.4
-    prandtl = eta * 1005.0 / 0.0257
-    p0 = rho0 * c0^2 / gamma
-    rho = rho0 * alpha * (1 + sigma * phi / (j * omega * rho0 * alpha) *
-          sqrt(1 + 4j * alpha^2 * eta * rho0 * omega / (sigma^2 * lambda_v^2 * phi^2)))
-    q0 = phi * lambda_t^2 / 8
-    nu_thermal = eta / (rho0 * prandtl)
-    alpha_thermal = 1 + nu_thermal * phi / (j * omega * q0) *
-                    sqrt(1 + 4j * omega * q0^2 / (nu_thermal * lambda_t^2 * phi^2))
-    bulk = gamma * p0 / (gamma - (gamma - 1) / alpha_thermal)
-    return (density=rho / phi, bulk_modulus=bulk / phi)
-end
-
 """Porous wavelength: the spatial period 2 pi / Re(k_eq) of the wave, k_eq = omega sqrt(rho_eq / K_eq)."""
 function porous_wavelength(parameters, frequency)
-    fluid = tube_reference_jca(parameters, frequency)
+    fluid = reference_jca(parameters, frequency)
     return 2pi / real(2pi * frequency * sqrt(fluid.density / fluid.bulk_modulus))
 end
 
 """Input impedance of a rigidly closed tube of length L: Z = -j Z_c cot(k_c L) (e^{+j omega t})."""
 function tube_reference_impedance(parameters, frequency, length_m)
-    fluid = tube_reference_jca(parameters, frequency)
+    fluid = reference_jca(parameters, frequency)
     omega = 2pi * frequency
     zc, kc = sqrt(fluid.density * fluid.bulk_modulus), omega * sqrt(fluid.density / fluid.bulk_modulus)
     return -im * zc * cot(kc * length_m)
@@ -116,7 +94,7 @@ function porous_tube_request(material, slabs; length_m, frequencies, order=1, wi
             "scale_to_m" => 1.0, "translation_m" => [0.0, 0.0, 0.0], "mesh_data" => data)],
         "regions" => [Dict("id" => region, "name" => "Tube", "kind" => "bounded_air", "mesh_ids" => [mesh],
             "volume_groups" => [Dict("mesh_id" => mesh, "dimension" => 3, "tag" => 1, "name" => "Volume")],
-            "sound_speed_m_per_s" => TUBE_C0, "density_kg_per_m3" => TUBE_RHO0, "loss_model" => material)],
+            "sound_speed_m_per_s" => C0, "density_kg_per_m3" => RHO0, "loss_model" => material)],
         "boundaries" => boundaries, "interfaces" => [],
         "components" => [Dict("id" => "component:piston", "name" => "Piston", "kind" => "ideal_velocity_source",
             "boundary_ids" => ["boundary:piston"], "parameters" => Dict())],

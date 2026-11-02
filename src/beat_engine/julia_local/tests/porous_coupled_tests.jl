@@ -8,30 +8,7 @@ const ENGINE_DIR = normpath(joinpath(@__DIR__, ".."))
 include(joinpath(ENGINE_DIR, "BeatEngineCompiledDriver.jl"))
 include(joinpath(ENGINE_DIR, "..", "julia_engine", "CompiledCoupledWorkload.jl"))
 
-const RHO0, C0 = 1.21, 343.0
-# Soft fibrous material, Allard & Atalla 2nd ed. Table 11.2, rigid frame.
-const SOFT_FIBROUS = Dict{String,Any}(
-    "model" => "jca", "frame" => "rigid", "porosity" => 0.98,
-    "flow_resistivity_pa_s_per_m2" => 25000.0, "tortuosity" => 1.02,
-    "viscous_characteristic_length_m" => 90e-6, "thermal_characteristic_length_m" => 180e-6)
-
-"""Analytical JCA (book form, e^{+j omega t}): Allard & Atalla Eqs. 5.50-5.55 with q0' = phi Lambda'^2/8."""
-function reference_jca(parameters, frequency; rho0=RHO0, c0=C0)
-    j, omega = im, 2pi * frequency
-    phi = parameters["porosity"]; sigma = parameters["flow_resistivity_pa_s_per_m2"]
-    alpha = parameters["tortuosity"]
-    lambda_v = parameters["viscous_characteristic_length_m"]
-    lambda_t = parameters["thermal_characteristic_length_m"]
-    eta, gamma = 1.84e-5, 1.4
-    prandtl = eta * 1005.0 / 0.0257
-    p0 = rho0 * c0^2 / gamma
-    rho = rho0 * alpha * (1 + sigma * phi / (j * omega * rho0 * alpha) *
-          sqrt(1 + 4j * alpha^2 * eta * rho0 * omega / (sigma^2 * lambda_v^2 * phi^2)))
-    bulk = gamma * p0 / (gamma - (gamma - 1) /
-           (1 + 8eta / (j * lambda_t^2 * prandtl * omega * rho0) *
-            sqrt(1 + j * rho0 * omega * prandtl * lambda_t^2 / (16eta))))
-    return (density=rho / phi, bulk_modulus=bulk / phi)
-end
+include(joinpath(@__DIR__, "porous_reference.jl"))
 
 """
 Plane-wave transfer of a uniform section of length L (e^{+j omega t}, specific impedances):
