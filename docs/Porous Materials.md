@@ -106,6 +106,82 @@ Diagnostics of porous requests list `fem_region_materials`: per region its
 normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
 `[real, imag]`. Air-only diagnostics are unchanged.
 
+## Mesh resolution
+
+A porous region needs a finer mesh than air: its wavelength is shorter and the wave
+is damped. The convergence study measures the input-impedance error of a filled tube
+over **elements per porous wavelength** N = λ / h, where
+
+- λ = 2π / Re(k_eq), k_eq = ω √(ρ_eq / K_eq), at the maximum solve frequency (at 5 kHz:
+  soft foam 57.5 mm, glass wool 52.6 mm, air 68.6 mm);
+- h is the mean tetrahedron edge length, which an isotropic mesh of target size h has
+  on average.
+
+Setup (`julia_local/tests/porous_tube_helpers.jl`): the piston-driven, rigidly closed
+tube of the validation below, built from cubes of side h / 1.26 split into six
+tetrahedra (mean edge h), one cube across, so the elements are isotropic. Two rigid-frame
+presets (spec preset table): soft foam (Table 11.5: φ 0.99, σ 10 900 Pa·s/m², α∞ 1.02,
+Λ/Λ′ 100/130 µm) and glass wool (Table 11.8: φ 0.94, σ 40 000 Pa·s/m², α∞ 1.06,
+Λ/Λ′ 56/110 µm). Error metric: |Z_FEM − Z| / |Z| against −j Z_c cot(k_c L), maximized
+over f_max ∈ {0.5, 2, 5, 10} kHz, tube lengths of 1, 2 and 4 porous wavelengths at
+f_max, and ten frequencies 0.1–1 × f_max (the mesh has N elements per wavelength at
+f_max and more below it). Worst relative input-impedance error:
+
+| Order | N | Soft foam | Glass wool |
+|---|---|---|---|
+| P1 | 4 | 2.3e-01 | 9.7e-02 |
+| P1 | 6 | 1.4e-01 | 5.2e-02 |
+| P1 | 8 | 7.2e-02 | 2.7e-02 |
+| P1 | 9 | 5.4e-02 | 2.2e-02 |
+| P1 | 10 | 5.2e-02 | 1.9e-02 |
+| P1 | 11 | 4.2e-02 | 1.5e-02 |
+| P1 | 12 | 3.4e-02 | 1.3e-02 |
+| P1 | 14 | 2.7e-02 | 1.0e-02 |
+| P1 | 16 | 2.0e-02 | 7.4e-03 |
+| P1 | 20 | 1.3e-02 | 4.9e-03 |
+| P1 | 24 | 9.1e-03 | 3.4e-03 |
+| P2 | 2 | 5.7e-02 | 6.3e-02 |
+| P2 | 3 | 1.8e-02 | 1.9e-02 |
+| P2 | 4 | 7.4e-03 | 8.0e-03 |
+| P2 | 5 | 3.2e-03 | 4.2e-03 |
+| P2 | 6 | 1.8e-03 | 2.4e-03 |
+| P2 | 8 | 7.8e-04 | 1.1e-03 |
+
+Smallest N on that grid that meets a target error, both materials:
+
+| Target error | P1 | P2 |
+|---|---|---|
+| 1 % | 24 | 4 |
+| 2 % | 16 | 3 |
+| **5 % (mesh-resolution threshold)** | **11** | **3** |
+
+The P1 worst case is soft foam, the least damped (0.8 Np per wavelength at 10 kHz),
+at 10 kHz in the shortest tube near its half-wave resonance; glass wool damps the
+wave in about one wavelength and needs roughly two thirds of the soft-foam N. The
+error is nearly independent of tube length beyond one wavelength, because the
+damping limits how far the dispersion error accumulates. P1 converges at second order;
+P2 at about third order (the plane wave crosses the tetrahedra obliquely, so the
+fourth-order dispersion of 1D P2 is not reached), and needs about a quarter of the
+P1 elements per wavelength.
+
+**Threshold.** A porous region whose mesh has fewer than 11 (P1) or 3 (P2) elements
+per porous wavelength at the maximum frequency is expected to exceed 5 % input-impedance
+error (about 0.4 dB). The 5 % target is a warning level, not an accuracy goal: Boundary Lab's
+default air FEM mesh (6 elements per air wavelength) is at about 10 % modal-frequency
+error for P1; stricter targets are in the table. The needed edge length is λ / N. The thresholds are data in
+`beat_contract/porous-mesh-resolution.json`; Python clients read them with
+`beat_engine.beat_contract.porous_mesh_edge_length_m(wavelength_m, element_order)`
+(Boundary Lab's mesh warning). The structured cubes are a best case for an
+unstructured mesh of the same mean edge, whose edge lengths vary; a client may
+compare a high percentile of the region's edges rather than the mean.
+
+Reproduce: `julia --threads=2 --project=src/beat_engine/julia_local
+src/beat_engine/julia_local/scripts/porous_convergence_study.jl` prints both tables
+(about 2 minutes). The slow test `porous_convergence_tests.jl` (in `runtests.jl` only
+with `BEAT_RUN_POROUS_CONVERGENCE=1`; run the file directly otherwise) checks that the
+recorded thresholds meet the target for both materials and that one element fewer
+per wavelength misses it.
+
 ## Current scope
 
 - Interior FEM solves (no FEM–BEM interfaces), CPU.
@@ -143,3 +219,5 @@ normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
   (limp) over the band, so the check discriminates. Further tests: an air tube anchors the piston sign, air and porous regions in one
   request match their separate solves, the porous operator keeps the air pattern,
   legacy and explicit air are bit-identical, and coupled solves refuse porous regions.
+  P2 (ten-node) tetrahedra in the porous operator: the soft-foam tube at 6 elements
+  per wavelength is 60 times more accurate than P1 and converges at about third order.
