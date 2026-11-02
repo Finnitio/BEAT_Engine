@@ -248,14 +248,14 @@ end
     end
 end
 
-@testset "coupled FEM-BEM solves refuse porous regions on every backend" begin
-    for backend in ("cpu", "cuda", "rocm", "metal")
+@testset "coupled FEM-BEM solves refuse porous regions on accelerator backends" begin
+    for backend in ("cuda", "rocm", "metal")
         request = JSON.parse(JSON.json(coupled_workload_request(; tiny=true)))
         interior = only(filter(r -> r["kind"] == "bounded_air", request["compiled_system"]["regions"]))
         interior["loss_model"] = SOFT_FIBROUS
         request["solver_options"]["bem_backend"] = backend
         @test validate_system_request(request) === nothing
-        @test_throws "Porous region materials are currently supported only for interior FEM" solve_coupled_workload(request)
+        @test_throws "Porous region materials in coupled FEM-BEM solves are currently supported only on the CPU" solve_coupled_workload(request)
     end
 end
 

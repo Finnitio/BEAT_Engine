@@ -352,6 +352,8 @@ widened copy of `fem_mesh`.
   consistently in Float64, so its row sums vanish to Float64 round-off on that geometry.
 - **Elements:** P1, exactly as `prepare_coupled_cache` assembles the cached system; the Float64
   stiffness and mass must have the cached stiffness's sparsity pattern, or this refuses.
+- **Regions:** a cache with per-region materials reassembles each region's `K_r`/`M_r` in
+  Float64 the same way and forms `sum_r a_r K_r + b_r M_r` on the same pattern.
 - **Walls:** wall-impedance boundary masses are widened, not reassembled: they are positive
   boundary terms with no cancellation to protect.
 - **Cache:** `store` (the cache's) keeps the matrices across frequencies, keyed by value on what
@@ -359,11 +361,14 @@ widened copy of `fem_mesh`.
   a mesh or loss change made in place is picked up.
 """
 function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz, sound_speed, density)
+    # Callers may pass a partial cache; one without `fem_regions` is air-only.
+    fem_regions = get(prepared, :fem_regions, nothing)
     walls = [operator.matrix for operator in prepared.wall_impedance_operators]
     cached = !isnothing(store) && haskey(store, :matrices) &&
              store[:vertices] == fem_mesh.vertices && store[:tetrahedra] == fem_mesh.tetrahedra &&
              store[:bulk_loss] == prepared.bulk_loss_factor_by_vertex && store[:walls] == walls &&
-             store[:thermoviscous] == prepared.thermoviscous_operator
+             store[:thermoviscous] == prepared.thermoviscous_operator &&
+             isequal(store[:fem_regions], fem_regions)
     matrices = cached ? store[:matrices] : nothing
     if isnothing(matrices)
         mesh = VolumeMesh{Float64}(
@@ -388,6 +393,8 @@ function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz
             walls=[SparseMatrixCSC{Float64,Int}(operator.matrix) for operator in prepared.wall_impedance_operators],
             thermoviscous=isnothing(prepared.thermoviscous_operator) ? nothing :
                 thermoviscous_surface_operator(mesh, prepared.thermoviscous_operator.face_indices),
+            region_operator=isnothing(fem_regions) ? nothing : prepare_region_fem_operator(
+                mesh, fem_regions.tetrahedron_ranges, fem_regions.materials, stiffness, mass),
         )
         if !isnothing(store)
             store[:vertices] = copy(fem_mesh.vertices)
@@ -395,16 +402,17 @@ function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz
             store[:bulk_loss] = copy(prepared.bulk_loss_factor_by_vertex)
             store[:walls] = [copy(matrix) for matrix in walls]
             store[:thermoviscous] = deepcopy(prepared.thermoviscous_operator)
+            store[:fem_regions] = deepcopy(fem_regions)
             store[:matrices] = matrices
         end
     end
     omega = 2pi * Float64(frequency_hz)
-    system = assemble_fem_dynamic_stiffness(
+    system = isnothing(matrices.region_operator) ? assemble_fem_dynamic_stiffness(
         matrices.stiffness,
         matrices.mass,
         omega / Float64(sound_speed);
         bulk_loss_mass=matrices.bulk_loss_mass,
-    )
+    ) : assemble_region_fem_operator(matrices.region_operator, omega, Float64(density), Float64(sound_speed))
     system = add_thermoviscous_terms(system, matrices.thermoviscous,
         Float64(frequency_hz), Float64(sound_speed), Float64(density))
     for (operator, matrix) in zip(prepared.wall_impedance_operators, matrices.walls)
@@ -1614,6 +1622,7 @@ function prepare_condensed_coupled_cache(
     wall_impedances=NamedTuple[],
     thermoviscous_walls=NamedTuple[],
     bem_backend::Symbol=:cpu,
+    fem_regions=nothing,
 ) where {T<:AbstractFloat}
     # The condensed solver's linear algebra is CPU-only; the BEM operators may
     # come from the CPU or from Metal, which hands them back as host matrices.
@@ -1631,6 +1640,7 @@ function prepare_condensed_coupled_cache(
         bulk_loss_factor_by_vertex=bulk_loss_factor_by_vertex,
         wall_impedances=wall_impedances,
         thermoviscous_walls=thermoviscous_walls,
+        fem_regions=fem_regions,
     )
     # The base order is always carried, whether or not any frequency selects it: with the q1 tier
     # enabled and a base order of 4, every frequency can select 1 or 2 and leave the base out of
@@ -1959,6 +1969,7 @@ function build_condensed_coupled_system(
     schur_block_columns::Int=32,
     allow_transducer_condensation::Bool=true,
     bem_operators=nothing,
+    fem_regions=nothing,
 ) where {T<:AbstractFloat}
     # `relative_residual` needs the monolithic coupled matrix, which this formulation never
     # forms. `fem_interior_residual` on each solution is the condensed-appropriate check.
@@ -2018,6 +2029,7 @@ function build_condensed_coupled_system(
         ),
         wall_impedances=wall_impedances,
         thermoviscous_walls=thermoviscous_walls,
+        fem_regions=fem_regions,
     ) : cache
     if !isnothing(cache)
         # Orders are compared as integers. `TriangleRule` defines no `==`, so comparing rules here
@@ -2049,12 +2061,7 @@ function build_condensed_coupled_system(
 
     omega = T(2pi) * frequency_hz
     wavenumber = omega / sound_speed
-    fem_system = assemble_fem_dynamic_stiffness(
-        prepared.stiffness,
-        prepared.mass,
-        wavenumber;
-        bulk_loss_mass=prepared.bulk_loss_mass,
-    )
+    fem_system = coupled_fem_dynamic_stiffness(prepared, omega, sound_speed, density)
     fem_system = add_thermoviscous_terms(
         fem_system, prepared.thermoviscous_operator, frequency_hz, sound_speed, density)
     wall_admittances = Complex{T}[

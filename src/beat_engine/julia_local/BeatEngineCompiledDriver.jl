@@ -1654,6 +1654,117 @@ function per_interface_errors(
     return pressure_errors, flux_errors
 end
 
+# Corner pairs of the six edge nodes (5:10) of a quadratic tetrahedron (see `p2_shape_functions`).
+const QUADRATIC_TETRAHEDRON_EDGES = ((1, 2), (2, 3), (3, 1), (1, 4), (4, 3), (2, 4))
+
+"""Exterior faces (sorted full-mesh vertex triples) of the tetrahedra with `tags`, mapped to their tetrahedron."""
+function _selection_exterior_faces(mesh::VolumeMesh, tags)
+    owner, count = Dict{NTuple{3,Int},Int}(), Dict{NTuple{3,Int},Int}()
+    for (index, tetrahedron) in enumerate(mesh.tetrahedra)
+        mesh.tetra_physical_tags[index] in tags || continue
+        for face in BeatEngineCoupled._tetrahedron_faces(tetrahedron)
+            count[face] = get(count, face, 0) + 1
+            owner[face] = index
+        end
+    end
+    return Dict(face => owner[face] for (face, n) in count if n == 1)
+end
+
+"""
+    find_region_seams(records)
+
+Classify the faces shared by two bounded regions on the same mesh (an exterior tetrahedron
+face of both selections, on different tetrahedra). A side is *assigned* when a mesh triangle on
+the face carries a tag that the region assigns to a boundary. Unassigned on both sides: a region
+seam (interior, shared nodes). Assigned on both sides: a thin rigid partition (today's
+duplicated nodes). Assigned on one side only: an error naming both regions.
+"""
+function find_region_seams(records)
+    seam_faces = [Set{NTuple{3,Int}}() for _ in records]
+    seam_vertices = Dict{String,Set{Int}}()
+    seams = NamedTuple[]
+    for i in eachindex(records), j in (i + 1):length(records)
+        a, b = records[i], records[j]
+        a.mesh_id == b.mesh_id || continue
+        shared = [face for (face, tetrahedron) in a.exterior_faces
+                  if get(b.exterior_faces, face, tetrahedron) != tetrahedron]
+        isempty(shared) && continue
+        pair_faces = NTuple{3,Int}[]
+        for face in shared
+            assigned_a, assigned_b = face in a.assigned_faces, face in b.assigned_faces
+            if assigned_a != assigned_b
+                error("A face shared by bounded regions $(repr(a.id)) and $(repr(b.id)) on mesh " *
+                      "$(repr(a.mesh_id)) is assigned only in region $(repr(assigned_a ? a.id : b.id)). " *
+                      "Assign it in both regions (a thin rigid partition) or in neither (a region seam).")
+            end
+            assigned_a || push!(pair_faces, face)
+        end
+        isempty(pair_faces) && continue
+        union!(seam_faces[i], pair_faces)
+        union!(seam_faces[j], pair_faces)
+        corners = Set{Int}(vertex for face in pair_faces for vertex in face)
+        nodes = copy(corners)
+        if is_quadratic(a.full_mesh)
+            edges = Set{Tuple{Int,Int}}(minmax(face[l], face[r]) for face in pair_faces
+                                        for (l, r) in ((1, 2), (2, 3), (1, 3)))
+            for record in (a, b), index in record.tetrahedron_indices
+                quadratic = record.full_mesh.quadratic_tetrahedra[index]
+                for (offset, (l, r)) in enumerate(QUADRATIC_TETRAHEDRON_EDGES)
+                    minmax(quadratic[l], quadratic[r]) in edges && push!(nodes, quadratic[4 + offset])
+                end
+            end
+        end
+        union!(get!(seam_vertices, a.mesh_id, Set{Int}()), nodes)
+        push!(seams, (region_ids=[a.id, b.id], mesh_id=a.mesh_id, face_count=length(pair_faces),
+                      node_count=length(nodes)))
+    end
+    return (; seams, seam_faces, seam_vertices)
+end
+
+"""
+The accelerator coupled FEM caches scale mass rows by a per-node bulk loss factor, which is
+single-valued at a seam node only when both regions agree. Interior and CPU coupled solves use
+per-region element operators and accept any factors.
+"""
+function require_uniform_seam_bulk_loss(fem_domains)
+    factor(id) = only(domain.material.bulk_loss_factor for domain in fem_domains.domains if domain.id == id)
+    for seam in fem_domains.region_seams
+        a, b = seam.region_ids
+        factor(a) == factor(b) || error(
+            "Region seam between $(repr(a)) and $(repr(b)) joins different bulk loss factors; " *
+            "coupled FEM-BEM solves support region seams only between regions with equal bulk loss.")
+    end
+    return nothing
+end
+
+"""Wire form of the region seams (diagnostic `fem_region_seams`)."""
+region_seams_wire(seams) = [Dict{String,Any}("region_ids" => seam.region_ids, "mesh_id" => seam.mesh_id,
+    "face_count" => seam.face_count, "node_count" => seam.node_count) for seam in seams]
+
+"""
+Nodal values in the wire layout: one row per region-local vertex, regions contiguous in
+request order, so a seam node appears once in each region that contains it.
+"""
+region_node_values(values, domains) = reduce(vcat, (values[domain.vertex_indices] for domain in domains))
+
+"""Interface map of a region's boundary in the aggregated FEM numbering."""
+function aggregated_interface_map(local_map, domain)
+    faces = domain.face_indices[local_map.fem_face_indices]
+    all(>(0), faces) || error("An interface face of region $(repr(domain.id)) lies on a region seam.")
+    return ConformingInterfaceMap(domain.vertex_indices[local_map.fem_vertex_indices],
+        local_map.fem_to_bem_vertex_indices, faces, local_map.bem_face_indices, local_map.normal_sign)
+end
+
+"""
+    aggregate_fem_domains(meshes, bounded_regions, boundaries, T; moving_boundary_ids)
+
+Aggregate the bounded regions into one FEM mesh. Regions on different meshes, and regions on
+one mesh separated by a face assigned on both sides, keep separate (duplicated) nodes. Faces
+two regions on one mesh share without an assignment on either side are region seams: interior
+faces whose nodes the regions share. `domains[r].vertex_indices` maps region-local vertices
+to aggregated nodes; `node_offset` is the region's offset in the wire layout
+(`region_node_values`).
+"""
 function aggregate_fem_domains(
     meshes,
     bounded_regions,
@@ -1677,15 +1788,17 @@ function aggregate_fem_domains(
     fem_boundary_tag_by_id = Dict{String,Int}()
     domain_by_boundary_id = Dict{String,Int}()
     next_boundary_tag = 1
+    records = NamedTuple[]
+    full_mesh_by_id = Dict{String,Any}()
 
-    for region in bounded_regions
+    for (region_index, region) in enumerate(bounded_regions)
         length(region["mesh_ids"]) == 1 ||
             error("Each bounded region must currently contain exactly one FEM mesh.")
         mesh_id = String(only(region["mesh_ids"]))
         resource = object_by_id(meshes, mesh_id, "mesh")
         String(resource["purpose"]) == "fem_volume" ||
             error("Bounded region mesh must be a FEM volume.")
-        full_mesh = translated_volume_mesh(resource, T)
+        full_mesh = get!(() -> translated_volume_mesh(resource, T), full_mesh_by_id, mesh_id)
         selected_volume_tags = [
             Int(group["tag"])
             for group in region["volume_groups"]
@@ -1722,7 +1835,7 @@ function aggregate_fem_domains(
             local_tag_map[source_tag] = solver_tag
             boundary_id = String(boundary["id"])
             fem_boundary_tag_by_id[boundary_id] = solver_tag
-            domain_by_boundary_id[boundary_id] = length(domains) + 1
+            domain_by_boundary_id[boundary_id] = region_index
             parameters = get(boundary, "parameters", Dict{String,Any}())
             boundary_kind = String(boundary["kind"])
             thermoviscous_model = get(parameters, "thermoviscous_wall_losses", "off")
@@ -1774,62 +1887,79 @@ function aggregate_fem_domains(
                 )
             end
         end
+        # Region-local vertex -> full-mesh vertex (restrict_volume_mesh keeps them sorted).
+        full_vertices = zeros(Int, length(selection.mesh.vertices))
+        for (full, local_index) in selection.vertex_index_map
+            full_vertices[local_index] = full
+        end
+        full_faces = [BeatEngineCoupled._sorted_face(ntuple(k -> full_vertices[face[k]], 3))
+                      for face in selection.mesh.boundary_faces]
+        push!(records, (
+            id=String(region["id"]), mesh_id=mesh_id, full_mesh=full_mesh, selection=selection,
+            material=material, bulk_loss_factor=bulk_loss_factor, local_tag_map=local_tag_map,
+            full_vertices=full_vertices, full_faces=full_faces,
+            tetrahedron_indices=findall(in(Set(selected_volume_tags)), full_mesh.tetra_physical_tags),
+            exterior_faces=_selection_exterior_faces(full_mesh, Set(selected_volume_tags)),
+            assigned_faces=Set(face for (face, tag) in zip(full_faces, selection.mesh.boundary_physical_tags)
+                               if haskey(local_tag_map, tag)),
+        ))
+    end
+
+    seam_analysis = find_region_seams(records)
+    merged_vertex_by_full = Dict(mesh_id => Dict{Int,Int}() for mesh_id in keys(seam_analysis.seam_vertices))
+    node_offset = 0
+    for (region_index, record) in enumerate(records)
+        selection = record.selection
+        seam_faces = seam_analysis.seam_faces[region_index]
+        kept_faces = [!(face in seam_faces) for face in record.full_faces]
         remapped_boundary_tags = [
-            get(local_tag_map, tag, 0)
-            for tag in selection.mesh.boundary_physical_tags
+            get(record.local_tag_map, tag, 0)
+            for (tag, kept) in zip(selection.mesh.boundary_physical_tags, kept_faces) if kept
         ]
         any(==(0), remapped_boundary_tags) && error(
-            "Selected FEM region $(repr(String(region["id"]))) contains an unassigned boundary tag.",
+            "Selected FEM region $(repr(record.id)) contains an unassigned boundary tag.",
         )
 
-        vertex_offset = length(vertices)
-        face_offset = length(boundary_faces)
+        seam_vertices = get(seam_analysis.seam_vertices, record.mesh_id, Set{Int}())
+        merged = get(merged_vertex_by_full, record.mesh_id, Dict{Int,Int}())
+        vertex_indices = Vector{Int}(undef, length(selection.mesh.vertices))
+        for (local_index, full) in enumerate(record.full_vertices)
+            existing = full in seam_vertices ? get(merged, full, 0) : 0
+            if existing > 0
+                vertex_indices[local_index] = existing
+                continue
+            end
+            push!(vertices, selection.mesh.vertices[local_index])
+            push!(bulk_loss_factor_by_vertex, record.bulk_loss_factor)
+            vertex_indices[local_index] = length(vertices)
+            full in seam_vertices && (merged[full] = length(vertices))
+        end
+        face_indices = zeros(Int, length(kept_faces))
+        face_indices[kept_faces] = length(boundary_faces) .+ (1:count(kept_faces))
         tetrahedron_range = (length(tetrahedra) + 1):(length(tetrahedra) + length(selection.mesh.tetrahedra))
-        append!(vertices, selection.mesh.vertices)
-        append!(bulk_loss_factor_by_vertex, fill(bulk_loss_factor, length(selection.mesh.vertices)))
-        append!(
-            tetrahedra,
-            [
-                ntuple(index -> tetrahedron[index] + vertex_offset, 4)
-                for tetrahedron in selection.mesh.tetrahedra
-            ],
-        )
+        remap(element) = map(index -> vertex_indices[index], element)
+        append!(tetrahedra, remap.(selection.mesh.tetrahedra))
         append!(tetra_tags, selection.mesh.tetra_physical_tags)
-        append!(
-            quadratic_tetrahedra,
-            [
-                ntuple(index -> tetrahedron[index] + vertex_offset, 10)
-                for tetrahedron in selection.mesh.quadratic_tetrahedra
-            ],
-        )
-        append!(
-            boundary_faces,
-            [
-                ntuple(index -> face[index] + vertex_offset, 3)
-                for face in selection.mesh.boundary_faces
-            ],
-        )
+        append!(quadratic_tetrahedra, remap.(selection.mesh.quadratic_tetrahedra))
+        append!(boundary_faces, remap.(selection.mesh.boundary_faces[kept_faces]))
         append!(boundary_tags, remapped_boundary_tags)
-        append!(
-            quadratic_boundary_faces,
-            [
-                ntuple(index -> face[index] + vertex_offset, 6)
-                for face in selection.mesh.quadratic_boundary_faces
-            ],
-        )
+        isempty(selection.mesh.quadratic_boundary_faces) ||
+            append!(quadratic_boundary_faces, remap.(selection.mesh.quadratic_boundary_faces[kept_faces]))
         push!(
             domains,
             (
-                id=String(region["id"]),
-                mesh_id=mesh_id,
+                id=record.id,
+                mesh_id=record.mesh_id,
                 selection=selection,
-                vertex_offset=vertex_offset,
-                face_offset=face_offset,
+                node_offset=node_offset,
+                vertex_indices=vertex_indices,
+                face_indices=face_indices,
                 vertex_count=length(selection.mesh.vertices),
                 tetrahedron_range=tetrahedron_range,
-                material=material,
+                material=record.material,
             ),
         )
+        node_offset += length(selection.mesh.vertices)
     end
 
     mesh = VolumeMesh{T}(
@@ -1849,6 +1979,7 @@ function aggregate_fem_domains(
         domain_by_boundary_id=domain_by_boundary_id,
         bulk_loss_factor_by_vertex=bulk_loss_factor_by_vertex,
         has_porous_regions=any(domain -> is_porous(domain.material), domains),
+        region_seams=seam_analysis.seams,
         wall_impedances=wall_impedances,
         thermoviscous_walls=thermoviscous_walls,
         plane_wave_terminations=plane_wave_terminations,
@@ -1906,11 +2037,7 @@ function combined_interface_map_from_wire(
             "Interface $(repr(interface_id)) references BEM mesh " *
             "$(repr(bem_mesh_id)) outside the unbounded region.",
         )
-        mapped = offset_interface_map(
-            local_map;
-            fem_vertex_offset=domain.vertex_offset,
-            fem_face_offset=domain.face_offset,
-        )
+        mapped = aggregated_interface_map(local_map, domain)
         push!(maps, mapped)
         count = length(mapped.fem_vertex_indices)
         push!(ranges, next_interface_dof:(next_interface_dof + count - 1))
@@ -2353,7 +2480,10 @@ function solve_interior_request(request, system, bounded_regions; event_mode=fal
     ) * mass
     # Requests with porous regions form sum_r a_r K_r + b_r M_r on the air pattern;
     # air-only requests keep the original operator arithmetic (bit-identical results).
-    region_operator = fem_domains.has_porous_regions ? prepare_region_fem_operator(
+    # Region seams also take this path: each region's air bulk loss then acts on its own
+    # elements, which per-vertex row scaling cannot express at shared seam nodes.
+    region_operator = fem_domains.has_porous_regions || !isempty(fem_domains.region_seams) ?
+                      prepare_region_fem_operator(
         fem_mesh,
         [domain.tetrahedron_range for domain in fem_domains.domains],
         [domain.material for domain in fem_domains.domains],
@@ -2587,13 +2717,13 @@ function solve_interior_request(request, system, bounded_regions; event_mode=fal
                     quantities,
                     quantity_wire(
                         output,
-                        rows(fem_pressures, FloatType),
+                        rows([region_node_values(p, fem_domains.domains) for p in fem_pressures], FloatType),
                         "Pa",
                         ["excitation", "fem_node"],
                         metadata=Dict(
                             "mesh_ids" => [domain.mesh_id for domain in fem_domains.domains],
                             "region_ids" => [domain.id for domain in fem_domains.domains],
-                            "node_offsets" => [domain.vertex_offset for domain in fem_domains.domains],
+                            "node_offsets" => [domain.node_offset for domain in fem_domains.domains],
                             "node_counts" => [domain.vertex_count for domain in fem_domains.domains],
                         ),
                     ),
@@ -2652,6 +2782,8 @@ function solve_interior_request(request, system, bounded_regions; event_mode=fal
             (isnothing(region_operator) ? () : ("fem_region_materials" => region_material_diagnostics(
                 [domain.id for domain in fem_domains.domains], region_operator.materials,
                 frequency_hz_value, density, sound_speed),))...,
+            (isempty(fem_domains.region_seams) ? () :
+             ("fem_region_seams" => region_seams_wire(fem_domains.region_seams),))...,
             "timings" => Dict(
                 "assembly_s" => assembly_s,
                 "solve_s" => solve_s,
@@ -2794,13 +2926,13 @@ function solve_request_impl(request; event_mode=false)
     bem_backend = Symbol(lowercase(String(get(solver_options, "bem_backend", "cpu"))))
     bem_backend in (:cpu, :cuda, :rocm, :metal) ||
         error("Unsupported coupled BEM backend: $bem_backend. Expected cpu, cuda, rocm, or metal.")
-    # Coupled FEM-BEM operators (monolithic, condensed, GPU) do not form per-region
-    # material operators yet; refuse rather than solve a porous fill as air.
+    # The CPU coupled paths (condensed and monolithic) form per-region material operators;
+    # the accelerator paths do not yet, so refuse rather than solve a porous fill as air.
     porous_region_ids = [String(region["id"]) for region in bounded_regions
                          if is_porous(parse_region_material(region["loss_model"], Float64))]
-    isempty(porous_region_ids) || error(
-        "Porous region materials are currently supported only for interior FEM solves without " *
-        "FEM-BEM interfaces; coupled solves ($(bem_backend) backend) do not support porous regions " *
+    isempty(porous_region_ids) || bem_backend == :cpu || error(
+        "Porous region materials in coupled FEM-BEM solves are currently supported only on the CPU " *
+        "backend; the $(bem_backend) backend does not support porous regions " *
         "$(join(repr.(porous_region_ids), ", ")) yet.")
     symmetry_mode = BeatEngineCore.normalized_symmetry_mode(
         get(solver_options, "symmetry", "off"),
@@ -2828,6 +2960,17 @@ function solve_request_impl(request; event_mode=false)
         moving_boundary_ids=Set(String(id) for component in components for id in component["boundary_ids"]),
     )
     fem_mesh = fem_domains.mesh
+    # Per-region materials (CPU) for requests with porous regions or region seams, as in the
+    # interior solve: each region's air bulk loss then acts on its own elements. Requests with
+    # neither keep the original air operator arithmetic (bit-identical results). Accelerator
+    # backends still scale mass rows per node, so their seams need equal bulk loss.
+    coupled_per_region = bem_backend == :cpu &&
+                         (fem_domains.has_porous_regions || !isempty(fem_domains.region_seams))
+    coupled_per_region || require_uniform_seam_bulk_loss(fem_domains)
+    coupled_fem_regions = coupled_per_region ? (
+        tetrahedron_ranges=[domain.tetrahedron_range for domain in fem_domains.domains],
+        materials=[domain.material for domain in fem_domains.domains],
+    ) : nothing
     bem_domain = aggregate_bem_region(meshes, unbounded_region, boundaries, FloatType)
     bem_mesh = bem_domain.mesh
     symmetry_tolerance = max(
@@ -3107,6 +3250,7 @@ function solve_request_impl(request; event_mode=false)
                 wall_impedances=fem_domains.wall_impedances,
                 thermoviscous_walls=fem_domains.thermoviscous_walls,
                 bem_backend=bem_backend,
+                fem_regions=coupled_fem_regions,
             )
         else
             prepare_coupled_cache(
@@ -3122,6 +3266,7 @@ function solve_request_impl(request; event_mode=false)
                 bulk_loss_factor_by_vertex=fem_domains.bulk_loss_factor_by_vertex,
                 wall_impedances=fem_domains.wall_impedances,
                 thermoviscous_walls=fem_domains.thermoviscous_walls,
+                fem_regions=coupled_fem_regions,
             )
         end
         cache_setup_s = (time_ns() - cache_setup_started) / 1.0e9
@@ -3201,6 +3346,7 @@ function solve_request_impl(request; event_mode=false)
                         isnothing(get(solver_options, "speaker_rom_rank_experiment", nothing)),
                     bem_operators=sweep_pipeline === nothing ? nothing :
                                   () -> take_sweep_assembly!(sweep_pipeline, frequency_index - sweep_pipeline_start + 1),
+                    fem_regions=coupled_fem_regions,
                 )
             else
                 build_coupled_system(
@@ -3227,6 +3373,7 @@ function solve_request_impl(request; event_mode=false)
                     transducers=transducers,
                     transducer_operators=transducer_operators,
                     prescribed_bem_normal_velocity=prescribed_bem_normal_velocity,
+                    fem_regions=coupled_fem_regions,
                 )
             end
             assembly_s = (time_ns() - assembly_started) / 1.0e9
@@ -3333,14 +3480,15 @@ function solve_request_impl(request; event_mode=false)
                         quantities,
                         quantity_wire(
                             output,
-                            rows([solution.fem_pressure for solution in solutions], FloatType),
+                            rows([region_node_values(solution.fem_pressure, fem_domains.domains)
+                                  for solution in solutions], FloatType),
                             "Pa",
                             ["excitation", "fem_node"],
                             metadata=Dict(
                                 "mesh_ids" => [domain.mesh_id for domain in fem_domains.domains],
                                 "region_ids" => [domain.id for domain in fem_domains.domains],
                                 "node_offsets" => [
-                                    domain.vertex_offset for domain in fem_domains.domains
+                                    domain.node_offset for domain in fem_domains.domains
                                 ],
                                 "node_counts" => [
                                     domain.vertex_count for domain in fem_domains.domains
@@ -3715,7 +3863,12 @@ function solve_request_impl(request; event_mode=false)
                     )
                     for region in bounded_regions
                 ),
+                (isempty(fem_domains.region_seams) ? () :
+                 ("fem_region_seams" => region_seams_wire(fem_domains.region_seams),))...,
                 "wall_impedance_boundary_ids" => [spec.boundary_id for spec in fem_domains.wall_impedances],
+                (isnothing(coupled_fem_regions) ? () : ("fem_region_materials" => region_material_diagnostics(
+                    [domain.id for domain in fem_domains.domains], coupled_fem_regions.materials,
+                    Float64(frequency_hz), Float64(density), Float64(sound_speed)),))...,
                 thermoviscous_diagnostics(
                     (use_condensed_solver ? coupled_system.cache.base : coupled_system.cache).thermoviscous_operator,
                     fem_domains.thermoviscous_walls, frequency_hz, sound_speed, density)...,
