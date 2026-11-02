@@ -149,4 +149,70 @@ end
     end
 end
 
+@testset "air and porous regions in one request match their separate solves" begin
+    lossy_air = Dict{String,Any}("bulk_loss_factor" => 0.1)
+    frequencies = (250.0, 1500.0)
+    mixed, _ = tube_request((lossy_air, 30, 0.1), (SOFT_FIBROUS, 30, 0.08); frequencies)
+    air, _ = tube_request((lossy_air, 30, 0.1); frequencies)
+    porous, _ = tube_request((SOFT_FIBROUS, 30, 0.08); frequencies)
+    for (m, a, p) in zip((solve_coupled_workload(r).results for r in (mixed, air, porous))...)
+        pm, offsets = pressures(m)
+        pa, _ = pressures(a)
+        pp, _ = pressures(p)
+        tube1 = (offsets[1] + 1):offsets[2]
+        tube2 = (offsets[2] + 1):size(pm, 2)
+        @test pm[1, tube1] ≈ pa[1, :] rtol=1e-10
+        @test pm[2, tube2] ≈ pp[1, :] rtol=1e-10
+        @test norm(pm[1, tube2]) == 0 && norm(pm[2, tube1]) == 0
+        materials = m["diagnostics"]["fem_region_materials"]
+        @test [entry["region_id"] for entry in materials] == ["region:tube1", "region:tube2"]
+        @test materials[1]["material"] == Dict("model" => "air", "bulk_loss_factor" => 0.1)
+        @test materials[2]["material"] == SOFT_FIBROUS
+        fluid = reference_jca(SOFT_FIBROUS, m["freq_hz"])
+        @test complex(materials[2]["equivalent_density_kg_per_m3"]...) ≈ fluid.density rtol=1e-12
+        @test !haskey(materials[1], "equivalent_density_kg_per_m3")
+        @test !haskey(a["diagnostics"], "fem_region_materials")
+    end
+end
+
+@testset "porous regions keep the air operator's sparsity pattern" begin
+    request, _ = tube_request((Dict{String,Any}(), 12, 0.1), (SOFT_FIBROUS, 12, 0.1); frequencies=(800.0,))
+    system = request["compiled_system"]
+    domains = aggregate_fem_domains(system["meshes"], system["regions"], system["boundaries"], Float64)
+    @test domains.has_porous_regions
+    stiffness, mass = assemble_fem_matrices(domains.mesh)
+    for weight in (1.0, 0.5)
+        blended = blend_fem_mass_matrix(mass, weight)
+        air = assemble_fem_dynamic_stiffness(stiffness, blended, 2pi * 800 / C0)
+        operator = prepare_region_fem_operator(domains.mesh, [d.tetrahedron_range for d in domains.domains],
+            [d.material for d in domains.domains], stiffness, mass; consistent_mass_weight=weight)
+        porous = assemble_region_fem_operator(operator, 2pi * 800, RHO0, C0)
+        @test porous.colptr == air.colptr && porous.rowval == air.rowval
+        # The air region's block is the air operator itself.
+        air_nodes = 1:domains.domains[1].vertex_count
+        @test porous[air_nodes, air_nodes] ≈ air[air_nodes, air_nodes] rtol=1e-14
+    end
+end
+
+@testset "air-only requests take the unchanged air path" begin
+    frequencies = (400.0, 1700.0)
+    legacy, _ = tube_request((Dict{String,Any}("bulk_loss_factor" => 0.05), 20, 0.1); frequencies)
+    explicit, _ = tube_request((Dict{String,Any}("model" => "air", "bulk_loss_factor" => 0.05), 20, 0.1); frequencies)
+    for (a, b) in zip(solve_coupled_workload(legacy).results, solve_coupled_workload(explicit).results)
+        @test reinterpret(UInt64, decode(only(a["quantities"]))) == reinterpret(UInt64, decode(only(b["quantities"])))
+        @test !haskey(a["diagnostics"], "fem_region_materials")
+    end
+end
+
+@testset "coupled FEM-BEM solves refuse porous regions on every backend" begin
+    for backend in ("cpu", "cuda", "rocm", "metal")
+        request = JSON.parse(JSON.json(coupled_workload_request(; tiny=true)))
+        interior = only(filter(r -> r["kind"] == "bounded_air", request["compiled_system"]["regions"]))
+        interior["loss_model"] = SOFT_FIBROUS
+        request["solver_options"]["bem_backend"] = backend
+        @test validate_system_request(request) === nothing
+        @test_throws "Porous region materials are currently supported only for interior FEM" solve_coupled_workload(request)
+    end
+end
+
 end # module
