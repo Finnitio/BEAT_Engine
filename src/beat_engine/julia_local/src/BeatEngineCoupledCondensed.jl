@@ -361,12 +361,14 @@ widened copy of `fem_mesh`.
   a mesh or loss change made in place is picked up.
 """
 function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz, sound_speed, density)
+    # Callers may pass a partial cache; one without `fem_regions` is air-only.
+    fem_regions = get(prepared, :fem_regions, nothing)
     walls = [operator.matrix for operator in prepared.wall_impedance_operators]
     cached = !isnothing(store) && haskey(store, :matrices) &&
              store[:vertices] == fem_mesh.vertices && store[:tetrahedra] == fem_mesh.tetrahedra &&
              store[:bulk_loss] == prepared.bulk_loss_factor_by_vertex && store[:walls] == walls &&
              store[:thermoviscous] == prepared.thermoviscous_operator &&
-             isequal(store[:fem_regions], prepared.fem_regions)
+             isequal(store[:fem_regions], fem_regions)
     matrices = cached ? store[:matrices] : nothing
     if isnothing(matrices)
         mesh = VolumeMesh{Float64}(
@@ -391,8 +393,8 @@ function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz
             walls=[SparseMatrixCSC{Float64,Int}(operator.matrix) for operator in prepared.wall_impedance_operators],
             thermoviscous=isnothing(prepared.thermoviscous_operator) ? nothing :
                 thermoviscous_surface_operator(mesh, prepared.thermoviscous_operator.face_indices),
-            region_operator=isnothing(prepared.fem_regions) ? nothing : prepare_region_fem_operator(
-                mesh, prepared.fem_regions.tetrahedron_ranges, prepared.fem_regions.materials, stiffness, mass),
+            region_operator=isnothing(fem_regions) ? nothing : prepare_region_fem_operator(
+                mesh, fem_regions.tetrahedron_ranges, fem_regions.materials, stiffness, mass),
         )
         if !isnothing(store)
             store[:vertices] = copy(fem_mesh.vertices)
@@ -400,7 +402,7 @@ function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz
             store[:bulk_loss] = copy(prepared.bulk_loss_factor_by_vertex)
             store[:walls] = [copy(matrix) for matrix in walls]
             store[:thermoviscous] = deepcopy(prepared.thermoviscous_operator)
-            store[:fem_regions] = deepcopy(prepared.fem_regions)
+            store[:fem_regions] = deepcopy(fem_regions)
             store[:matrices] = matrices
         end
     end
