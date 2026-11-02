@@ -121,3 +121,57 @@ def test_cli_rejects_invalid_later_repeat(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         compare.main()
     assert exc.value.code == 2
+
+
+matrix = load_script("benchmark_matrix")
+porous_requests = load_script("porous_benchmark_requests")
+
+
+def test_matrix_interleaves_rounds_and_compares_in_config_order(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(matrix.subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    other = tmp_path / "main" / "src"
+    argv = ["matrix", "--backend", "cuda", "--runs", "2", "--out-dir", str(tmp_path / "runs")]
+    argv += ["--config", f"main=req.json@{other}", "--config", "JCA limp=req.json"]
+    monkeypatch.setattr(sys, "argv", argv)
+    matrix.main()
+    runs, (compare_command, _) = calls[:-1], calls[-1]
+    outs = [Path(command[command.index("--out") + 1]).name for command, _ in runs]
+    assert outs == ["main_r1.json", "JCA_limp_r1.json", "main_r2.json", "JCA_limp_r2.json"]
+    assert all(command[command.index("--backend") + 1] == "cuda" for command, _ in runs)
+    assert all(Path(command[command.index("--out") + 1]).is_absolute() for command, _ in runs)
+    assert runs[0][1]["env"]["PYTHONPATH"].split(os.pathsep)[0] == str(other.resolve())
+    assert runs[1][1]["env"].get("PYTHONPATH") == os.environ.get("PYTHONPATH")
+    stages = [compare_command[i + 1] for i, arg in enumerate(compare_command) if arg == "--stage"]
+    assert [stage.split("=")[0] for stage in stages] == ["main", "JCA limp"]
+    assert stages[1].endswith("JCA_limp_r*.json")
+
+
+def test_matrix_config_keeps_windows_drive_letters():
+    label, request, source = matrix.parse_config(r"main=C:\runs\sawmod.json@C:\src\BEAT_main\src")
+    assert label == "main"
+    assert str(request).endswith(r"C:\runs\sawmod.json") or request.name == "sawmod.json"
+    assert str(source).endswith("src")
+
+
+def test_porous_variants_change_only_the_body_material(tmp_path, monkeypatch):
+    regions = [
+        {"id": "region:chamber", "kind": "bounded_air", "loss_model": {"bulk_loss_factor": 0.02}},
+        {"id": "region:port", "kind": "bounded_air", "loss_model": {"bulk_loss_factor": 0.01}},
+    ]
+    request = {"compiled_system": {"regions": regions}, "solver_options": {"precision": "float32"}}
+    (tmp_path / "box.json").write_text(json.dumps(request))
+    argv = ["porous", str(tmp_path / "box.json"), "--body", "region:chamber", "--out-dir", str(tmp_path / "out")]
+    monkeypatch.setattr(sys, "argv", argv)
+    porous_requests.main()
+    loss = {}
+    for name in ("air", "jca", "jcal", "limp"):
+        variant = json.loads((tmp_path / "out" / f"box_{name}.json").read_text())
+        assert variant["solver_options"] == {"precision": "float32", "phasor_convention": "exp(+i omega t)"}
+        chamber, port = variant["compiled_system"]["regions"]
+        assert port == regions[1]
+        loss[name] = chamber["loss_model"]
+    assert loss["air"] == {"bulk_loss_factor": 0.02}
+    assert (loss["jca"]["model"], loss["jca"]["frame"], loss["jca"]["porosity"]) == ("jca", "rigid", 0.98)
+    assert loss["jcal"]["static_thermal_permeability_m2"] == 2e-9 and loss["jcal"]["model"] == "jcal"
+    assert loss["limp"]["frame"] == "limp" and loss["limp"]["frame_density_kg_per_m3"] == 30.0

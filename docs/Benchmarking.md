@@ -3,7 +3,9 @@
 Any change claimed to affect speed, memory or accuracy is measured this way
 before the claim goes in a commit message or PR. The tools are
 `scripts/benchmark_worker.py` (one run of one configuration through the real
-worker) and `scripts/compare_benchmarks.py` (repeated runs, compared).
+worker), `scripts/compare_benchmarks.py` (repeated runs, compared) and
+`scripts/benchmark_matrix.py` (several configurations, interleaved in rounds of
+fresh workers, then compared; another engine commit as `LABEL=REQUEST@<checkout>/src`).
 
 ## Workloads
 
@@ -14,13 +16,18 @@ Use real projects on each solve path the change touches, and say which path:
 | Exterior radiator (source request) | `solver.jl` | `test_meshes/sample.msh` (1,390 dofs), `sample_detailed.msh` (3,502 dofs) |
 | Exterior-only system solve (compiled request) | `coupled_solver.jl` | the same meshes, seeded as an exterior-only system |
 | Coupled system solve (compiled request) | `coupled_solver.jl` | a Boundary Lab project, e.g. `examples/Multi_region_SAWMOD` (coupled FEM-BEM-LEM) |
+| Interior FEM solve (compiled request) | `coupled_solver.jl` | a Boundary Lab project without exterior, e.g. `examples/compression_driver` |
+| Porous region materials | `coupled_solver.jl` | the Air, JCA, JCAL and JCA+limp variants of one project from `scripts/porous_benchmark_requests.py` (docs/Porous Materials.md, Performance) |
 
 Boundary Lab's GUI sends exterior projects as exterior-only system solves, not
 source requests. Capture a Boundary Lab request with
 `scripts/capture_boundary_lab_request.py` from a Boundary Lab checkout: pass a
 project, or `--exterior-mesh` with a mesh and its radiator tag to seed an
 exterior-only system the way the GUI does. The request references that
-checkout's meshes, so it is not committed here.
+checkout's meshes, so it is not committed here. It leaves out
+`solver_options.phasor_convention` (the engine default, `exp(-i omega t)`), while
+Boundary Lab solves send `exp(+i omega t)`; set it in the request to time what the
+application runs (`porous_benchmark_requests.py` does).
 
 ## Runs
 
