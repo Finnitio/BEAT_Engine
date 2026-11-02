@@ -394,8 +394,29 @@ end
         velocity(result) = decode(only(q for q in result["quantities"] if q["quantity"] == "diaphragm_velocity"))
         @test velocity(s) ≈ velocity(r) rtol=1e-9
     end
-    @test_throws "joins different bulk loss factors" solve_coupled_workload(
-        split_coupled_request(; upper_loss=Dict{String,Any}("bulk_loss_factor" => 0.05)))
+end
+
+@testset "coupled seam with differing bulk loss: per-region operator on CPU, refused on accelerators" begin
+    # CPU coupled solves form each region's bulk loss on its own elements, as interior solves do.
+    lossy = Dict{String,Any}("bulk_loss_factor" => 0.05)
+    condensed = solve_coupled_workload(split_coupled_request(; upper_loss=lossy)).results
+    monolithic_request = split_coupled_request(; upper_loss=lossy)
+    monolithic_request["solver_options"]["static_condensation"] = false
+    monolithic = solve_coupled_workload(monolithic_request).results
+    equal = solve_coupled_workload(split_coupled_request()).results
+    velocity(result) = decode(only(q for q in result["quantities"] if q["quantity"] == "diaphragm_velocity"))
+    for (c, m, e) in zip(condensed, monolithic, equal)
+        @test velocity(c) ≈ velocity(m) rtol=1e-9
+        # The extra loss in the upper region changes the load on the diaphragm.
+        @test !isapprox(velocity(c), velocity(e); rtol=1e-4)
+        materials = c["diagnostics"]["fem_region_materials"]
+        @test [entry["material"]["bulk_loss_factor"] for entry in materials] == [0.02, 0.05]
+    end
+    for backend in ("cuda", "rocm", "metal")
+        request = split_coupled_request(; upper_loss=lossy)
+        request["solver_options"]["bem_backend"] = backend
+        @test_throws "joins different bulk loss factors" solve_coupled_workload(request)
+    end
 end
 
 end # region seams

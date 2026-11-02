@@ -1722,9 +1722,9 @@ function find_region_seams(records)
 end
 
 """
-The coupled FEM caches scale mass rows by a per-node bulk loss factor, which is single-valued
-at a seam node only when both regions agree. Interior solves use per-region element operators
-and accept any factors.
+The accelerator coupled FEM caches scale mass rows by a per-node bulk loss factor, which is
+single-valued at a seam node only when both regions agree. Interior and CPU coupled solves use
+per-region element operators and accept any factors.
 """
 function require_uniform_seam_bulk_loss(fem_domains)
     factor(id) = only(domain.material.bulk_loss_factor for domain in fem_domains.domains if domain.id == id)
@@ -2959,11 +2959,15 @@ function solve_request_impl(request; event_mode=false)
         FloatType;
         moving_boundary_ids=Set(String(id) for component in components for id in component["boundary_ids"]),
     )
-    require_uniform_seam_bulk_loss(fem_domains)
     fem_mesh = fem_domains.mesh
-    # Per-region materials only for requests with porous regions: air-only requests keep the
-    # original air operator arithmetic (bit-identical results).
-    coupled_fem_regions = fem_domains.has_porous_regions ? (
+    # Per-region materials (CPU) for requests with porous regions or region seams, as in the
+    # interior solve: each region's air bulk loss then acts on its own elements. Requests with
+    # neither keep the original air operator arithmetic (bit-identical results). Accelerator
+    # backends still scale mass rows per node, so their seams need equal bulk loss.
+    coupled_per_region = bem_backend == :cpu &&
+                         (fem_domains.has_porous_regions || !isempty(fem_domains.region_seams))
+    coupled_per_region || require_uniform_seam_bulk_loss(fem_domains)
+    coupled_fem_regions = coupled_per_region ? (
         tetrahedron_ranges=[domain.tetrahedron_range for domain in fem_domains.domains],
         materials=[domain.material for domain in fem_domains.domains],
     ) : nothing
