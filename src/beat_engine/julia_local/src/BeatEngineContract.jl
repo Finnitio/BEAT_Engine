@@ -184,16 +184,16 @@ function impedance_outputs(request)
 end
 
 # Region materials (loss_model). A loss model without "model" is legacy air.
-# Porous models list required SI parameters (lower bound, upper bound, inclusive lower);
-# frames list their extra parameters. Keep in sync with beat_contract/__init__.py.
+# Porous models list required SI parameters with their admissible range (`high=nothing`:
+# unbounded); frames list their extra parameters. Keep in sync with beat_contract/__init__.py.
 const POROUS_PARAMETERS = Dict(
-    "porosity" => (0.0, 1.0, false),
-    "flow_resistivity_pa_s_per_m2" => (0.0, nothing, false),
-    "tortuosity" => (1.0, nothing, true),
-    "viscous_characteristic_length_m" => (0.0, nothing, false),
-    "thermal_characteristic_length_m" => (0.0, nothing, false),
-    "static_thermal_permeability_m2" => (0.0, nothing, false),
-    "frame_density_kg_per_m3" => (0.0, nothing, false),
+    "porosity" => (low=0.0, high=1.0, low_inclusive=false),
+    "flow_resistivity_pa_s_per_m2" => (low=0.0, high=nothing, low_inclusive=false),
+    "tortuosity" => (low=1.0, high=nothing, low_inclusive=true),
+    "viscous_characteristic_length_m" => (low=0.0, high=nothing, low_inclusive=false),
+    "thermal_characteristic_length_m" => (low=0.0, high=nothing, low_inclusive=false),
+    "static_thermal_permeability_m2" => (low=0.0, high=nothing, low_inclusive=false),
+    "frame_density_kg_per_m3" => (low=0.0, high=nothing, low_inclusive=false),
 )
 const JCA_PARAMETERS = ["porosity", "flow_resistivity_pa_s_per_m2", "tortuosity",
                         "viscous_characteristic_length_m", "thermal_characteristic_length_m"]
@@ -230,11 +230,11 @@ function region_material(region)
         push!(allowed, "frame")
         for key in vcat(REGION_MATERIAL_MODELS[model], REGION_MATERIAL_FRAMES[frame])
             push!(allowed, key)
-            low, high, inclusive = POROUS_PARAMETERS[key]
+            (; low, high, low_inclusive) = POROUS_PARAMETERS[key]
             value = get(loss_model, key, nothing)
-            json_number(value) && (inclusive ? value >= low : value > low) &&
+            json_number(value) && (low_inclusive ? value >= low : value > low) &&
                 (high === nothing || value <= high) ||
-                fail(path, "$key must be a number $(inclusive ? ">=" : ">") $low" *
+                fail(path, "$key must be a number $(low_inclusive ? ">=" : ">") $low" *
                      (high === nothing ? "" : " and <= $high"))
         end
     end

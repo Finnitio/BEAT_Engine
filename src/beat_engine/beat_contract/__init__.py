@@ -12,7 +12,7 @@ import json
 import math
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 COMPILED_SYSTEM_VERSION = 3
 SYSTEM_SOLVE_REQUEST_VERSION = 1
@@ -211,14 +211,22 @@ def _impedance_outputs(request: dict) -> None:
 # Region materials (loss_model). A loss model without "model" is legacy air.
 # Each porous model lists its required SI parameters with their admissible range;
 # each frame lists the extra parameters it needs. Keep in sync with BeatEngineContract.jl.
+class _ParameterRange(NamedTuple):
+    """Admissible range of a porous parameter; `high=None` is unbounded."""
+
+    low: float
+    high: float | None
+    low_inclusive: bool
+
+
 _POROUS_PARAMETERS = {
-    "porosity": (0.0, 1.0, False),
-    "flow_resistivity_pa_s_per_m2": (0.0, None, False),
-    "tortuosity": (1.0, None, True),
-    "viscous_characteristic_length_m": (0.0, None, False),
-    "thermal_characteristic_length_m": (0.0, None, False),
-    "static_thermal_permeability_m2": (0.0, None, False),
-    "frame_density_kg_per_m3": (0.0, None, False),
+    "porosity": _ParameterRange(low=0.0, high=1.0, low_inclusive=False),
+    "flow_resistivity_pa_s_per_m2": _ParameterRange(low=0.0, high=None, low_inclusive=False),
+    "tortuosity": _ParameterRange(low=1.0, high=None, low_inclusive=True),
+    "viscous_characteristic_length_m": _ParameterRange(low=0.0, high=None, low_inclusive=False),
+    "thermal_characteristic_length_m": _ParameterRange(low=0.0, high=None, low_inclusive=False),
+    "static_thermal_permeability_m2": _ParameterRange(low=0.0, high=None, low_inclusive=False),
+    "frame_density_kg_per_m3": _ParameterRange(low=0.0, high=None, low_inclusive=False),
 }
 _JCA_PARAMETERS = (
     "porosity",
@@ -268,14 +276,16 @@ def _region_material(region: dict) -> None:
         allowed.add("frame")
         for key in (*REGION_MATERIAL_MODELS[model], *REGION_MATERIAL_FRAMES[frame]):
             allowed.add(key)
-            low, high, inclusive = _POROUS_PARAMETERS[key]
+            limits = _POROUS_PARAMETERS[key]
             value = loss_model.get(key)
             if (
                 not _number(value)
-                or (value < low if inclusive else value <= low)
-                or (high is not None and value > high)
+                or (value < limits.low if limits.low_inclusive else value <= limits.low)
+                or (limits.high is not None and value > limits.high)
             ):
-                bound = f"{'>=' if inclusive else '>'} {low:g}" + ("" if high is None else f" and <= {high:g}")
+                bound = f"{'>=' if limits.low_inclusive else '>'} {limits.low:g}" + (
+                    "" if limits.high is None else f" and <= {limits.high:g}"
+                )
                 _fail(path, f"{key} must be a number {bound}")
     unknown = sorted(set(loss_model) - allowed)
     if unknown:
