@@ -157,3 +157,14 @@ def test_matrix_refused_for_bounded_request():
 
 def test_current_compiled_contract_version():
     assert COMPILED_SYSTEM_VERSION == 3
+
+
+def test_porous_mesh_resolution_names_the_needed_edge_per_element_order():
+    from beat_engine.beat_contract import porous_mesh_edge_length_m
+
+    # A 50 mm porous wavelength needs edges of at most lambda / N per element order;
+    # N is the documented study threshold (docs/Porous Materials.md, Mesh resolution).
+    assert porous_mesh_edge_length_m(0.05, 1) == pytest.approx(0.05 / 11)
+    assert porous_mesh_edge_length_m(0.05, 2) == pytest.approx(0.05 / 3)
+    with pytest.raises(ValueError, match="element order"):
+        porous_mesh_edge_length_m(0.05, 3)

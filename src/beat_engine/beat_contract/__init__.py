@@ -366,3 +366,19 @@ def validate_solve_request(raw: dict) -> None:
     )
     _unique([output["id"] for output in raw["outputs"]], "request.outputs")
     _impedance_outputs(raw)
+
+
+@lru_cache(maxsize=1)
+def porous_mesh_resolution() -> dict:
+    """Minimum elements per porous wavelength by FEM element order, from the filled-tube
+    convergence study ("Mesh resolution" in docs/Porous Materials.md)."""
+    return json.loads(Path(__file__).with_name("porous-mesh-resolution.json").read_text(encoding="utf-8"))
+
+
+def porous_mesh_edge_length_m(wavelength_m: float, element_order: int) -> float:
+    """Largest mean tetrahedron edge length that meets the study's target error in a porous
+    region whose wavelength 2 pi / Re(k_eq) at the maximum frequency is ``wavelength_m``."""
+    thresholds = porous_mesh_resolution()["min_elements_per_wavelength"]
+    if str(element_order) not in thresholds:
+        raise ValueError(f"No porous mesh-resolution threshold for element order {element_order}.")
+    return wavelength_m / thresholds[str(element_order)]

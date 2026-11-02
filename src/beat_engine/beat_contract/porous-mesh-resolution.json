@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "description": "Minimum FEM elements per porous wavelength by element order (P1 = 1, P2 = 2), from the filled-tube convergence study in docs/Porous Materials.md (Mesh resolution).",
+  "wavelength": "2 pi / Re(k_eq), k_eq = omega sqrt(rho_eq / K_eq), at the maximum solve frequency",
+  "element_size": "mean tetrahedron edge length",
+  "target_relative_impedance_error": 0.05,
+  "min_elements_per_wavelength": {"1": 11, "2": 3}
+}
