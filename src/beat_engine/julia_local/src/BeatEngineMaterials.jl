@@ -152,3 +152,112 @@ function equivalent_fluid_properties(material::RegionMaterial, frequency_hz, den
         thermal_length=Float64(material.thermal_characteristic_length_m),
         static_thermal_permeability=Float64(material.static_thermal_permeability_m2))
 end
+
+"""
+    region_operator_coefficients(material, omega, density, sound_speed)
+
+Per-frequency `(stiffness, mass)` coefficients of one region in the rho0-normalized
+operator a K_r + b M_r. Air reproduces the air-only operator K - k^2 M - i sign eta k^2 M;
+porous regions use a = rho0/rho_eq and b = -omega^2 rho0/K_eq.
+"""
+function region_operator_coefficients(material::RegionMaterial, omega::T, density, sound_speed) where {T<:AbstractFloat}
+    if material.model == :air
+        squared_wavenumber = (omega / T(sound_speed))^2
+        return (stiffness=one(Complex{T}),
+                mass=-squared_wavenumber - Complex{T}(0, propagation_sign() * T(material.bulk_loss_factor) * squared_wavenumber))
+    end
+    fluid = equivalent_fluid_properties(material, Float64(omega) / 2pi, density, sound_speed)
+    rho0 = Float64(density)
+    return (stiffness=Complex{T}(rho0 / fluid.density),
+            mass=Complex{T}(-Float64(omega)^2 * rho0 / fluid.bulk_modulus))
+end
+
+"""
+Per-region stiffness and mass values on one shared sparsity pattern. Forming
+A(omega) = sum_r a_r K_r + b_r M_r only rewrites `nzval`, so `colptr`/`rowval` are those
+of the air operator for every frequency (symbolic analyses and the Float64 condensed
+path's identical-pattern requirement stay valid).
+"""
+struct RegionFemOperator{T<:AbstractFloat}
+    order::Int
+    colptr::Vector{Int}
+    rowval::Vector{Int}
+    stiffness_values::Vector{Vector{T}}
+    mass_values::Vector{Vector{T}}
+    materials::Vector{RegionMaterial{Float64}}
+end
+
+function _structural_union(a::SparseMatrixCSC, b::SparseMatrixCSC)
+    size(a) == size(b) || error("Region FEM operators must have matching shapes.")
+    ia, ja, _ = findnz(a)
+    ib, jb, _ = findnz(b)
+    return sparse(vcat(ia, ib), vcat(ja, jb), ones(Int8, length(ia) + length(ib)), size(a)...)
+end
+
+function _values_on_pattern(pattern::SparseMatrixCSC, matrix::SparseMatrixCSC{T}) where {T}
+    values = zeros(T, nnz(pattern))
+    for column in 1:size(matrix, 2)
+        slot = pattern.colptr[column]
+        last_slot = pattern.colptr[column + 1] - 1
+        for index in nzrange(matrix, column)
+            row = matrix.rowval[index]
+            while slot <= last_slot && pattern.rowval[slot] < row
+                slot += 1
+            end
+            slot <= last_slot && pattern.rowval[slot] == row ||
+                error("Region FEM operator entry ($row, $column) lies outside the shared pattern.")
+            values[slot] = matrix.nzval[index]
+        end
+    end
+    return values
+end
+
+"""
+    prepare_region_fem_operator(mesh, tetrahedron_ranges, materials, stiffness, mass;
+                                consistent_mass_weight)
+
+Assemble each region's stiffness and (blended) mass over its own tetrahedra and store
+them on the pattern of the global `stiffness`/`mass` pair.
+"""
+function prepare_region_fem_operator(mesh::VolumeMesh{T}, tetrahedron_ranges, materials,
+        stiffness::SparseMatrixCSC{T}, mass::SparseMatrixCSC{T}; consistent_mass_weight=one(T)) where {T}
+    length(tetrahedron_ranges) == length(materials) || error("Each FEM region needs one material.")
+    pattern = _structural_union(stiffness, mass)
+    quadratic = is_quadratic(mesh)
+    stiffness_values, mass_values = Vector{T}[], Vector{T}[]
+    for range in tetrahedron_ranges
+        region_mesh = VolumeMesh(mesh.vertices, mesh.tetrahedra[range], mesh.tetra_physical_tags[range],
+            mesh.boundary_faces, mesh.boundary_physical_tags, mesh.physical_names,
+            quadratic ? mesh.quadratic_tetrahedra[range] : mesh.quadratic_tetrahedra,
+            mesh.quadratic_boundary_faces)
+        region_stiffness, region_mass = assemble_fem_matrices(region_mesh)
+        push!(stiffness_values, _values_on_pattern(pattern, region_stiffness))
+        push!(mass_values, _values_on_pattern(pattern,
+            blend_fem_mass_matrix(region_mass, T(consistent_mass_weight))))
+    end
+    return RegionFemOperator{T}(size(pattern, 1), pattern.colptr, pattern.rowval,
+        stiffness_values, mass_values, collect(RegionMaterial{Float64}, materials))
+end
+
+"""Form A(omega) = sum_r a_r K_r + b_r M_r on the shared pattern."""
+function assemble_region_fem_operator(operator::RegionFemOperator{T}, omega, density, sound_speed) where {T}
+    values = zeros(Complex{T}, length(operator.rowval))
+    for (material, stiffness, mass) in zip(operator.materials, operator.stiffness_values, operator.mass_values)
+        coefficients = region_operator_coefficients(material, T(omega), density, sound_speed)
+        @. values += coefficients.stiffness * stiffness + coefficients.mass * mass
+    end
+    return SparseMatrixCSC(operator.order, operator.order, copy(operator.colptr), copy(operator.rowval), values)
+end
+
+"""Per-region material diagnostics (normalized material and, if porous, rho_eq and K_eq)."""
+function region_material_diagnostics(region_ids, materials, frequency_hz, density, sound_speed)
+    return [begin
+        entry = Dict{String,Any}("region_id" => String(id), "material" => region_material_wire(material))
+        if is_porous(material)
+            fluid = equivalent_fluid_properties(material, frequency_hz, density, sound_speed)
+            entry["equivalent_density_kg_per_m3"] = [real(fluid.density), imag(fluid.density)]
+            entry["equivalent_bulk_modulus_pa"] = [real(fluid.bulk_modulus), imag(fluid.bulk_modulus)]
+        end
+        entry
+    end for (id, material) in zip(region_ids, materials)]
+end

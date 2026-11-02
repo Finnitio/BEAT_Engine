@@ -1699,7 +1699,9 @@ function aggregate_fem_domains(
             error("All bounded FEM regions must use the same tetrahedron order.")
         end
         loss_model = get(region, "loss_model", Dict{String,Any}())
-        bulk_loss_factor = T(get(loss_model, "bulk_loss_factor", 0.0))
+        material = parse_region_material(loss_model, Float64)
+        porous = is_porous(material)
+        bulk_loss_factor = porous ? zero(T) : T(get(loss_model, "bulk_loss_factor", 0.0))
         isfinite(bulk_loss_factor) && zero(T) <= bulk_loss_factor <= one(T) || error(
             "Bounded-region FEM bulk loss factor must be finite and between 0 and 1.",
         )
@@ -1724,6 +1726,10 @@ function aggregate_fem_domains(
             parameters = get(boundary, "parameters", Dict{String,Any}())
             boundary_kind = String(boundary["kind"])
             thermoviscous_model = get(parameters, "thermoviscous_wall_losses", "off")
+            porous && !(boundary_kind in ("rigid", "moving", "interface", "unused") &&
+                        thermoviscous_model == "off" && !haskey(parameters, "wall_impedance")) && error(
+                "Boundary $(repr(boundary_id)) of porous region $(repr(String(region["id"]))) must be a " *
+                "rigid, moving, interface or unused boundary without wall losses or wall impedance.")
             thermoviscous_model in ("off", "thin_boundary_layer") || error(
                 "Unsupported thermoviscous wall loss model: $thermoviscous_model")
             if thermoviscous_model == "thin_boundary_layer"
@@ -1778,6 +1784,7 @@ function aggregate_fem_domains(
 
         vertex_offset = length(vertices)
         face_offset = length(boundary_faces)
+        tetrahedron_range = (length(tetrahedra) + 1):(length(tetrahedra) + length(selection.mesh.tetrahedra))
         append!(vertices, selection.mesh.vertices)
         append!(bulk_loss_factor_by_vertex, fill(bulk_loss_factor, length(selection.mesh.vertices)))
         append!(
@@ -1819,6 +1826,8 @@ function aggregate_fem_domains(
                 vertex_offset=vertex_offset,
                 face_offset=face_offset,
                 vertex_count=length(selection.mesh.vertices),
+                tetrahedron_range=tetrahedron_range,
+                material=material,
             ),
         )
     end
@@ -1839,6 +1848,7 @@ function aggregate_fem_domains(
         fem_boundary_tag_by_id=fem_boundary_tag_by_id,
         domain_by_boundary_id=domain_by_boundary_id,
         bulk_loss_factor_by_vertex=bulk_loss_factor_by_vertex,
+        has_porous_regions=any(domain -> is_porous(domain.material), domains),
         wall_impedances=wall_impedances,
         thermoviscous_walls=thermoviscous_walls,
         plane_wave_terminations=plane_wave_terminations,
@@ -2341,6 +2351,16 @@ function solve_interior_request(request, system, bounded_regions; event_mode=fal
     bulk_loss_mass = spdiagm(
         0 => FloatType.(fem_domains.bulk_loss_factor_by_vertex),
     ) * mass
+    # Requests with porous regions form sum_r a_r K_r + b_r M_r on the air pattern;
+    # air-only requests keep the original operator arithmetic (bit-identical results).
+    region_operator = fem_domains.has_porous_regions ? prepare_region_fem_operator(
+        fem_mesh,
+        [domain.tetrahedron_range for domain in fem_domains.domains],
+        [domain.material for domain in fem_domains.domains],
+        stiffness,
+        consistent_mass;
+        consistent_mass_weight=fem_consistent_mass_weight,
+    ) : nothing
     wall_operators = [
         begin
             face_indices = findall(==(Int(spec.tag)), fem_mesh.boundary_physical_tags)
@@ -2461,12 +2481,12 @@ function solve_interior_request(request, system, bounded_regions; event_mode=fal
         omega = FloatType(2pi) * frequency_hz
         wavenumber = omega / sound_speed
         assembly_started = time_ns()
-        fem_system = assemble_fem_dynamic_stiffness(
+        fem_system = isnothing(region_operator) ? assemble_fem_dynamic_stiffness(
             stiffness,
             mass,
             wavenumber;
             bulk_loss_mass=bulk_loss_mass,
-        )
+        ) : assemble_region_fem_operator(region_operator, omega, density, sound_speed)
         fem_system = add_thermoviscous_terms(
             fem_system, thermoviscous_operator, frequency_hz, sound_speed, density)
         for operator in wall_operators
@@ -2629,6 +2649,9 @@ function solve_interior_request(request, system, bounded_regions; event_mode=fal
             thermoviscous_diagnostics(thermoviscous_operator, fem_domains.thermoviscous_walls,
                 frequency_hz, sound_speed, density)...,
             "relative_residual" => relative_residual,
+            (isnothing(region_operator) ? () : ("fem_region_materials" => region_material_diagnostics(
+                [domain.id for domain in fem_domains.domains], region_operator.materials,
+                frequency_hz_value, density, sound_speed),))...,
             "timings" => Dict(
                 "assembly_s" => assembly_s,
                 "solve_s" => solve_s,
@@ -2771,6 +2794,14 @@ function solve_request_impl(request; event_mode=false)
     bem_backend = Symbol(lowercase(String(get(solver_options, "bem_backend", "cpu"))))
     bem_backend in (:cpu, :cuda, :rocm, :metal) ||
         error("Unsupported coupled BEM backend: $bem_backend. Expected cpu, cuda, rocm, or metal.")
+    # Coupled FEM-BEM operators (monolithic, condensed, GPU) do not form per-region
+    # material operators yet; refuse rather than solve a porous fill as air.
+    porous_region_ids = [String(region["id"]) for region in bounded_regions
+                         if is_porous(parse_region_material(region["loss_model"], Float64))]
+    isempty(porous_region_ids) || error(
+        "Porous region materials are currently supported only for interior FEM solves without " *
+        "FEM-BEM interfaces; coupled solves ($(bem_backend) backend) do not support porous regions " *
+        "$(join(repr.(porous_region_ids), ", ")) yet.")
     symmetry_mode = BeatEngineCore.normalized_symmetry_mode(
         get(solver_options, "symmetry", "off"),
     )
