@@ -4,7 +4,8 @@
 # Reference: J.-F. Allard and N. Atalla, Propagation of Sound in Porous Media, 2nd ed.
 # (Wiley, 2009). Johnson density Eqs. 5.50/5.52, simplified Lafarge bulk modulus
 # Eqs. 5.51/5.53, JCA as JCAL with k0' = phi Lambda'^2 / 8 (Eqs. 5.54/5.55), and the
-# equivalent fluid rho_eq = rho/phi, K_eq = K/phi (Eqs. 5.43/5.44). The book's
+# equivalent fluid rho_eq = rho/phi, K_eq = K/phi (Eqs. 5.43/5.44), and the limp frame
+# (Panneton approximation, Eq. 11.55) applied to rho_eq with K_eq unchanged. The book's
 # e^{+j omega t} is written here as j omega = time_derivative(omega), so every formula
 # follows the active phasor convention.
 #
@@ -17,9 +18,10 @@
 # sharing nodes.
 
 """
-Normalized region material. `model` is `:air` or `:jca` (`:jcal` follows); `frame` is
-`:none` for air and `:rigid` for porous models (`:limp` follows). Porous parameters are
-SI; `static_thermal_permeability_m2` is phi Lambda'^2 / 8 for JCA. Unused fields are NaN.
+Normalized region material. `model` is `:air`, `:jca` or `:jcal`; `frame` is `:none` for
+air and `:rigid` or `:limp` for porous models. Porous parameters are SI;
+`static_thermal_permeability_m2` is phi Lambda'^2 / 8 for JCA and the measured k0' for
+JCAL; `frame_density_kg_per_m3` (rho1) is set only for a limp frame. Unused fields are NaN.
 """
 struct RegionMaterial{T<:AbstractFloat}
     model::Symbol
@@ -31,6 +33,7 @@ struct RegionMaterial{T<:AbstractFloat}
     viscous_characteristic_length_m::T
     thermal_characteristic_length_m::T
     static_thermal_permeability_m2::T
+    frame_density_kg_per_m3::T
 end
 
 const POROUS_MATERIAL_KEYS = (
@@ -66,12 +69,14 @@ function parse_region_material(loss_model, ::Type{T}) where {T<:AbstractFloat}
         factor = T(haskey(loss_model, "bulk_loss_factor") ? _material_number(loss_model, "bulk_loss_factor") : 0.0)
         zero(T) <= factor <= one(T) ||
             error("Bounded-region FEM bulk loss factor must be finite and between 0 and 1.")
-        return RegionMaterial{T}(:air, :none, factor, nan, nan, nan, nan, nan, nan)
+        return RegionMaterial{T}(:air, :none, factor, nan, nan, nan, nan, nan, nan, nan)
     end
-    model == "jca" || error("Unsupported region material model: $(repr(model)).")
+    model in ("jca", "jcal") || error("Unsupported region material model: $(repr(model)).")
     frame = String(get(loss_model, "frame", ""))
-    frame == "rigid" || error("Unsupported porous frame: $(repr(frame)).")
-    allowed = ("model", "frame", POROUS_MATERIAL_KEYS...)
+    frame in ("rigid", "limp") || error("Unsupported porous frame: $(repr(frame)).")
+    allowed = ("model", "frame", POROUS_MATERIAL_KEYS...,
+        (model == "jcal" ? ("static_thermal_permeability_m2",) : ())...,
+        (frame == "limp" ? ("frame_density_kg_per_m3",) : ())...)
     all(key -> key in allowed, keys(loss_model)) ||
         error("Unsupported $model material keys: $(join(sort([k for k in keys(loss_model) if !(k in allowed)]), ", ")).")
     porosity, sigma, tortuosity, viscous, thermal = (_material_number(loss_model, key) for key in POROUS_MATERIAL_KEYS)
@@ -79,19 +84,27 @@ function parse_region_material(loss_model, ::Type{T}) where {T<:AbstractFloat}
     sigma > 0 || error("Flow resistivity must be positive.")
     tortuosity >= 1 || error("Tortuosity must be at least 1.")
     viscous > 0 && thermal > 0 || error("Characteristic lengths must be positive.")
-    k0_thermal = porosity * thermal^2 / 8
-    return RegionMaterial{T}(:jca, Symbol(frame), nan, T(porosity), T(sigma), T(tortuosity),
-        T(viscous), T(thermal), T(k0_thermal))
+    # Lambda' < Lambda is unusual but admissible; warning about it is the client's job.
+    k0_thermal = model == "jcal" ? _material_number(loss_model, "static_thermal_permeability_m2") :
+                 porosity * thermal^2 / 8
+    k0_thermal > 0 || error("Static thermal permeability must be positive.")
+    frame_density = frame == "limp" ? _material_number(loss_model, "frame_density_kg_per_m3") : NaN
+    frame == "rigid" || frame_density > 0 || error("Frame density must be positive.")
+    return RegionMaterial{T}(Symbol(model), Symbol(frame), nan, T(porosity), T(sigma), T(tortuosity),
+        T(viscous), T(thermal), T(k0_thermal), T(frame_density))
 end
 
 """Normalized wire form (inverse of `parse_region_material`) for diagnostics and provenance."""
 function region_material_wire(material::RegionMaterial)
     material.model == :air && return Dict{String,Any}(
         "model" => "air", "bulk_loss_factor" => Float64(material.bulk_loss_factor))
+    keys = (POROUS_MATERIAL_KEYS...,
+        (material.model == :jcal ? ("static_thermal_permeability_m2",) : ())...,
+        (material.frame == :limp ? ("frame_density_kg_per_m3",) : ())...)
     return Dict{String,Any}(
         "model" => String(material.model),
         "frame" => String(material.frame),
-        (key => Float64(getfield(material, Symbol(key))) for key in POROUS_MATERIAL_KEYS)...,
+        (key => Float64(getfield(material, Symbol(key))) for key in keys)...,
     )
 end
 
@@ -144,13 +157,30 @@ function equivalent_fluid_properties(material::RegionMaterial, frequency_hz, den
     isfinite(frequency_hz) && frequency_hz > 0 && rho0 > 0 && c0 > 0 ||
         error("Region materials require positive finite frequency, density and sound speed.")
     material.model == :air && return (density=complex(rho0), bulk_modulus=complex(rho0 * c0^2))
-    return jcal_equivalent_fluid(2pi * Float64(frequency_hz), rho0, porous_air_constants(rho0, c0);
+    rigid = jcal_equivalent_fluid(2pi * Float64(frequency_hz), rho0, porous_air_constants(rho0, c0);
         porosity=Float64(material.porosity),
         flow_resistivity=Float64(material.flow_resistivity_pa_s_per_m2),
         tortuosity=Float64(material.tortuosity),
         viscous_length=Float64(material.viscous_characteristic_length_m),
         thermal_length=Float64(material.thermal_characteristic_length_m),
         static_thermal_permeability=Float64(material.static_thermal_permeability_m2))
+    material.frame == :limp || return rigid
+    return (density=limp_frame_density(rigid.density, Float64(material.frame_density_kg_per_m3),
+                Float64(material.porosity), rho0),
+            bulk_modulus=rigid.bulk_modulus)
+end
+
+"""
+    limp_frame_density(rigid_density, frame_density, porosity, rho0)
+
+Panneton's limp-frame density (Allard & Atalla Eq. 11.55) from the rigid-frame
+equivalent density rho_eq: (rho_t rho_eq - rho0^2) / (rho_t + rho_eq - 2 rho0) with the
+total apparent density rho_t = rho1 + phi rho0. It tends to rho_t as omega -> 0 and to
+rho_eq as rho1 -> infinity.
+"""
+function limp_frame_density(rigid_density, frame_density, porosity, rho0)
+    total = frame_density + porosity * rho0
+    return (total * rigid_density - rho0^2) / (total + rigid_density - 2rho0)
 end
 
 """
