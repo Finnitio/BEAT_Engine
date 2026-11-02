@@ -1854,6 +1854,7 @@ include(joinpath(@__DIR__, "thermoviscous_tests.jl"))
 include(joinpath(@__DIR__, "thermoviscous_driver_tests.jl"))
 include(joinpath(@__DIR__, "porous_material_tests.jl"))
 include(joinpath(@__DIR__, "porous_driver_tests.jl"))
+include(joinpath(@__DIR__, "region_seam_tests.jl"))
 include(joinpath(@__DIR__, "porous_coupled_tests.jl"))
 # Required standalone thin-air qualification: exterior_coupled_agreement_tests.jl.
 # Its runtime exceeds the default-suite budget; see docs/ExteriorCoupledQualification.md.

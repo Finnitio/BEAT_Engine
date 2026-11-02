@@ -117,6 +117,41 @@ Diagnostics of porous requests list `fem_region_materials`: per region its
 normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
 `[real, imag]`. Air-only diagnostics are unchanged.
 
+## Region seams
+
+Two bounded regions on the same FEM mesh (same `mesh_ids`, different `volume_groups`)
+meet at the tetrahedron faces both selections have on their exterior. Each shared face is
+classified by its boundary assignments; a side counts as assigned when a mesh triangle on
+the face carries a tag that the region assigns to one of its boundaries:
+
+| Region A | Region B | Result |
+|---|---|---|
+| unassigned | unassigned | **Region seam**: an interior face. The regions share its nodes (corners, and edge nodes for P2), so pressure and volume flux are continuous through the weak form alone, with no boundary or interface object. A triangle on the face whose tag neither region assigns is dropped. |
+| assigned | assigned | Thin rigid partition: each region keeps its own (duplicated) nodes and boundary, exactly as before seams existed. |
+| assigned | unassigned | Error naming both regions and the assigned one: assign the face in both regions or in neither. |
+
+Faces of regions on different meshes are never seams. A node on a seam face is shared by
+every region on that mesh that contains it.
+
+**Bulk loss at seam nodes.** The interior operator for a request with seams is the region
+operator above, so each region's `bulk_loss_factor` acts on its own elements
+(b_r M_r): a seam node gets each side's mass contribution with that side's factor, and
+regions with different factors (air|air or air|porous) are well defined. The coupled FEM–BEM
+caches still scale mass rows per node; there a seam between regions with different bulk loss
+factors is rejected ("joins different bulk loss factors"), equal factors are exact. The
+aggregate's per-node `bulk_loss_factor_by_vertex` holds the first region's factor at seam nodes.
+
+**Output layout.** `fem_nodal_pressure` keeps one row per region-local vertex, regions
+contiguous in request order (`region_ids`, `node_offsets`, `node_counts`), region-local order
+the sorted mesh vertex index. A seam node therefore appears once in each adjoining region's
+block with one value; consumers need no change. Internally `domains[r].vertex_indices` maps
+region-local vertices to the merged FEM nodes and `domains[r].face_indices` region-local
+boundary triangles to the aggregated ones (0 for a dropped seam triangle).
+
+**Diagnostics.** Results of requests with seams carry `fem_region_seams`: per adjoining region
+pair `region_ids`, `mesh_id`, `face_count` and `node_count`. Requests without seams are
+unchanged (no key, bit-identical results).
+
 ## Current scope
 
 - Interior FEM solves, CPU.
@@ -124,8 +159,9 @@ normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
   Float32), including porous regions that reach an interface to the exterior.
 - Coupled solves on CUDA, ROCm and Metal refuse porous regions before mesh or device
   setup, rather than solving the fill as air.
-- Regions on one mesh do not yet share seam vertices; each region is closed by its
-  own boundaries.
+- Region seams work in interior solves and in CPU coupled FEM–BEM solves (any region
+  materials; each region's bulk loss acts on its own elements). On accelerator coupled
+  backends seams need equal bulk loss on both sides.
 
 ## Validation
 
@@ -175,3 +211,20 @@ normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
   and air-only coupled requests with legacy and explicit air are bit-identical.
   Air-only coupled results were also checked bit-identical against the previous
   engine (tiny workload: Float32/Float64, condensed/monolithic, Float64 FEM).
+- `region_seam_tests.jl` (compiled requests, one mesh): an air tube (0.1 m) in front of a
+  rigidly backed soft fibrous layer (0.05 m) as two regions with a region seam, piston at
+  z = 0. Against the transfer-matrix solution (Allard & Atalla Ch. 11.3.1 and 11.5.1,
+  written as a test helper), at 200, 800 and 2000 Hz in both phasor conventions: the
+  surface impedance of the layer (fitted from the air field as an impedance tube does), and
+  the cross-section mean pressure in the air and in the layer. Tolerance 2e-3 relative with
+  2.5 mm P1 slabs (measured max 1.5e-3, layer pressure at 2 kHz; impedance 2.4e-4) and a
+  convergence ratio above 3 per halving (measured 4.0). Nodal values within one cross-section
+  of this one-element-wide tube spread by O(h) (slanted tetrahedra); the plane mean is the
+  plane-wave quantity. Further tests: air|air seams (P1 and P2, with and without unassigned
+  seam triangles) equal the single-region tube (rtol 1e-11); a lossless|lossy air seam matches
+  the transfer matrix with the loss on the back side only; a face assigned on both sides
+  gives the thin rigid partition with results equal to values pinned from engine 97a56c3;
+  one-sided assignment errors with both region ids; a coupled FEM–BEM solve of the tiny
+  workload split into two seam-joined regions equals the single-region solve (rtol 1e-9); on
+  CPU differing bulk loss across a coupled seam is accepted (monolithic equals condensed,
+  rtol 1e-9) and on accelerator backends it is rejected.

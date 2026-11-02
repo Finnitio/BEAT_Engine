@@ -99,6 +99,17 @@ reject unknown models, frames and keys, out-of-range parameters, and wall losses
 wall impedance or terminations on porous-region boundaries. See
 [Porous Materials](Porous%20Materials.md).
 
+### Region seams
+
+Bounded regions may share one FEM mesh. A tetrahedron face both regions have on their
+exterior is a **region seam** when neither region assigns a boundary to it: the engine
+shares its nodes and treats it as interior. A face assigned in both regions is a thin rigid
+partition (duplicated nodes); a face assigned in only one region is an engine error naming
+both regions. `fem_nodal_pressure` keeps region-contiguous rows of region-local vertices, so
+seam nodes appear in each adjoining region. Seams are detected from the mesh by the engine,
+not by the static validators. See
+[Porous Materials](Porous%20Materials.md#region-seams).
+
 ### Exterior ideal-velocity-source motion
 
 An `ideal_velocity_source` with a `normal_velocity` port prescribes a unit
