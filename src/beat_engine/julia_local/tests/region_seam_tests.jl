@@ -323,6 +323,98 @@ end
 end
 
 """
+Two square columns side by side along x on one mesh, `front_slabs + back_slabs` slabs along z,
+six (Kuhn) tetrahedra per cube. Column x0 below `front_m` has volume tag 1 (A), above it tag 5
+(B); column x1 has tag 8 (C). Triangle tags: 2 piston (x0, z=0), 4 walls of A, 7 walls of B,
+10 walls of C, 9 the partition plane x = width between the columns. A|B is a region seam
+whose rim lies on the partition, so C touches the seam nodes there. `order=2` adds edge
+midpoint nodes as in `lined_tube_mesh`.
+"""
+function partitioned_column_mesh(front_slabs, back_slabs; front_m, back_m, width_m=0.02, order=1)
+    slabs = front_slabs + back_slabs
+    z_of(iz) = iz == front_slabs ? front_m : iz < front_slabs ? iz * front_m / front_slabs :
+               front_m + (iz - front_slabs) * back_m / back_slabs
+    vertices = [(ix * width_m, iy * width_m, z_of(iz)) for iz in 0:slabs for iy in 0:1 for ix in 0:2]
+    node(ix, iy, iz) = 1 + ix + 3iy + 6iz
+    tetrahedra, volume_tags = NTuple{4,Int}[], Int[]
+    for iz in 0:slabs-1, ix in 0:1
+        v = [node(ix,0,iz), node(ix+1,0,iz), node(ix,1,iz), node(ix+1,1,iz),
+             node(ix,0,iz+1), node(ix+1,0,iz+1), node(ix,1,iz+1), node(ix+1,1,iz+1)]
+        for t in ((1,2,4,8), (1,4,3,8), (1,3,7,8), (1,7,5,8), (1,5,6,8), (1,6,2,8))
+            push!(tetrahedra, ntuple(i -> v[t[i]], 4))
+            push!(volume_tags, ix == 1 ? 8 : iz < front_slabs ? 1 : 5)
+        end
+    end
+    counts = Dict{NTuple{3,Int},Int}()
+    for t in tetrahedra, f in ((t[1],t[2],t[3]), (t[1],t[2],t[4]), (t[1],t[3],t[4]), (t[2],t[3],t[4]))
+        key = Tuple(sort(collect(f))); counts[key] = get(counts, key, 0) + 1
+    end
+    on_x(f, x) = all(v -> vertices[v][1] == x, f)
+    exterior = sort!([f for (f, n) in counts if n == 1])
+    partition = sort!([f for (f, n) in counts if n == 2 && on_x(f, width_m)])
+    tag(f) = any(v -> vertices[v][1] > width_m, f) ? 10 :
+             all(v -> vertices[v][3] == 0.0, f) ? 2 :
+             maximum(vertices[v][3] for v in f) <= front_m ? 4 : 7
+    faces, tags = vcat(exterior, partition), vcat(tag.(exterior), fill(9, length(partition)))
+    if order == 2
+        midpoint = Dict{Tuple{Int,Int},Int}()
+        middle(a, b) = get!(midpoint, minmax(a, b)) do
+            push!(vertices, Tuple((collect(vertices[a]) .+ collect(vertices[b])) ./ 2))
+            length(vertices)
+        end
+        tetrahedra = [(t..., middle(t[1], t[2]), middle(t[2], t[3]), middle(t[1], t[3]),
+                       middle(t[1], t[4]), middle(t[2], t[4]), middle(t[3], t[4])) for t in tetrahedra]
+        faces = [(f..., middle(f[1], f[2]), middle(f[2], f[3]), middle(f[3], f[1])) for f in faces]
+    end
+    matrix(rows) = reduce(vcat, [permutedims(collect(row)) for row in rows])
+    cell(kind, rows, tags) = Dict("type" => kind,
+        "connectivity" => coupled_workload_packed(Int64.(matrix(rows) .- 1), "<i8"),
+        "physical_tags" => coupled_workload_packed(Int64.(tags), "<i8"))
+    names = Dict("A" => [1, 3], "B" => [5, 3], "C" => [8, 3], "Piston" => [2, 2], "AWalls" => [4, 2],
+                 "BWalls" => [7, 2], "Partition" => [9, 2], "CWalls" => [10, 2])
+    data = Dict("schema_version" => 1,
+        "points" => coupled_workload_packed(Float64.(matrix(vertices)), "<f8"),
+        "cells" => [cell(order == 2 ? "triangle6" : "triangle", faces, tags),
+                    cell(order == 2 ? "tetra10" : "tetra", tetrahedra, volume_tags)],
+        "physical_names" => names)
+    return data, vertices
+end
+
+@testset "three regions: a partition rim on a seam keeps the partitioned region separate" begin
+    # A|B is a region seam; C is walled off from A and B by a partition assigned on both sides.
+    # The seam nodes on the partition rim belong to C as well, but C must keep its own copies:
+    # C has no source (zero pressure) and A|B reproduce the single region over column x0.
+    front_m, back_m, frequencies = 0.1, 0.05, (300.0, 1700.0)
+    lossy = Dict{String,Any}("bulk_loss_factor" => 0.1)
+    for order in (1, 2)
+        data, vertices = partitioned_column_mesh(12, 6; front_m, back_m, order)
+        partition = ("partition", "rigid", 9)
+        a = ("a", lossy, [1], [("piston", "moving", 2), ("walls", "rigid", 4), partition])
+        b = ("b", lossy, [5], [("walls", "rigid", 7), partition])
+        c = ("c", Dict{String,Any}(), [8], [("walls", "rigid", 10), partition])
+        column = ("column", lossy, [1, 5], [("piston", "moving", 2), ("awalls", "rigid", 4),
+                                             ("bwalls", "rigid", 7), partition])
+        three = lined_tube_request(data, [a, b, c]; frequencies)
+        system = three["compiled_system"]
+        domains = aggregate_fem_domains(system["meshes"], system["regions"], system["boundaries"], Float64)
+        seam_nodes = order == 2 ? 9 : 4
+        @test [seam.region_ids for seam in domains.region_seams] == [["region:a", "region:b"]]
+        @test length(domains.mesh.vertices) == sum(d.vertex_count for d in domains.domains) - seam_nodes
+        x0 = [i for (i, v) in enumerate(vertices) if v[1] <= 0.02]
+        za = [vertices[i][3] for i in x0]
+        split_results = solve_coupled_workload(three).results
+        single_results = solve_coupled_workload(lined_tube_request(data, [column]; frequencies)).results
+        for (s, r) in zip(split_results, single_results)
+            blocks = region_pressures(s)
+            reference = region_pressures(r)["region:column"]
+            @test norm(blocks["region:c"]) == 0
+            @test blocks["region:a"] ≈ reference[za .<= front_m] rtol=1e-11
+            @test blocks["region:b"] ≈ reference[za .>= front_m] rtol=1e-11
+        end
+    end
+end
+
+"""
 The tiny coupled workload with its FEM cube split into two bounded regions on the one mesh:
 the six tetrahedra on the interface (bottom) face stay in `region:interior`, the other ten
 move to `region:upper` (volume tag 6) with the radiator and the side walls. The faces between

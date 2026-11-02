@@ -1678,10 +1678,15 @@ face of both selections, on different tetrahedra). A side is *assigned* when a m
 the face carries a tag that the region assigns to a boundary. Unassigned on both sides: a region
 seam (interior, shared nodes). Assigned on both sides: a thin rigid partition (today's
 duplicated nodes). Assigned on one side only: an error naming both regions.
+
+`seam_links` lists `(i, j, nodes)` per seam: the full-mesh nodes (corners and, for quadratic
+tetrahedra, edge nodes) of the seam faces between records `i` and `j`. Only these region-pair
+copies are joined (`seam_node_owners`); a third region touching such a node across a partition
+keeps its own copy.
 """
 function find_region_seams(records)
     seam_faces = [Set{NTuple{3,Int}}() for _ in records]
-    seam_vertices = Dict{String,Set{Int}}()
+    seam_links = Tuple{Int,Int,Set{Int}}[]
     seams = NamedTuple[]
     for i in eachindex(records), j in (i + 1):length(records)
         a, b = records[i], records[j]
@@ -1714,11 +1719,34 @@ function find_region_seams(records)
                 end
             end
         end
-        union!(get!(seam_vertices, a.mesh_id, Set{Int}()), nodes)
+        push!(seam_links, (i, j, nodes))
         push!(seams, (region_ids=[a.id, b.id], mesh_id=a.mesh_id, face_count=length(pair_faces),
                       node_count=length(nodes)))
     end
-    return (; seams, seam_faces, seam_vertices)
+    return (; seams, seam_faces, seam_links)
+end
+
+"""
+    seam_node_owners(seam_links)
+
+Union-find over region-local node copies `(record index, full-mesh node)`, joined only along
+the seam faces of each region pair. Maps every linked copy to its class representative: the
+copy in the earliest record, so it is aggregated before the copies that reuse it.
+"""
+function seam_node_owners(seam_links)
+    parent = Dict{Tuple{Int,Int},Tuple{Int,Int}}()
+    function root(copy)
+        p = get!(parent, copy, copy)
+        p == copy && return copy
+        r = root(p)
+        parent[copy] = r
+        return r
+    end
+    for (i, j, nodes) in seam_links, node in nodes
+        a, b = root((i, node)), root((j, node))
+        a == b || (parent[max(a, b)] = min(a, b))
+    end
+    return Dict(copy => root(copy) for copy in collect(keys(parent)))
 end
 
 """
@@ -1906,7 +1934,8 @@ function aggregate_fem_domains(
     end
 
     seam_analysis = find_region_seams(records)
-    merged_vertex_by_full = Dict(mesh_id => Dict{Int,Int}() for mesh_id in keys(seam_analysis.seam_vertices))
+    seam_owner = seam_node_owners(seam_analysis.seam_links)
+    aggregated_by_owner = Dict{Tuple{Int,Int},Int}()
     node_offset = 0
     for (region_index, record) in enumerate(records)
         selection = record.selection
@@ -1920,11 +1949,10 @@ function aggregate_fem_domains(
             "Selected FEM region $(repr(record.id)) contains an unassigned boundary tag.",
         )
 
-        seam_vertices = get(seam_analysis.seam_vertices, record.mesh_id, Set{Int}())
-        merged = get(merged_vertex_by_full, record.mesh_id, Dict{Int,Int}())
         vertex_indices = Vector{Int}(undef, length(selection.mesh.vertices))
         for (local_index, full) in enumerate(record.full_vertices)
-            existing = full in seam_vertices ? get(merged, full, 0) : 0
+            owner = get(seam_owner, (region_index, full), nothing)
+            existing = owner === nothing ? 0 : get(aggregated_by_owner, owner, 0)
             if existing > 0
                 vertex_indices[local_index] = existing
                 continue
@@ -1932,7 +1960,7 @@ function aggregate_fem_domains(
             push!(vertices, selection.mesh.vertices[local_index])
             push!(bulk_loss_factor_by_vertex, record.bulk_loss_factor)
             vertex_indices[local_index] = length(vertices)
-            full in seam_vertices && (merged[full] = length(vertices))
+            owner === nothing || (aggregated_by_owner[owner] = length(vertices))
         end
         face_indices = zeros(Int, length(kept_faces))
         face_indices[kept_faces] = length(boundary_faces) .+ (1:count(kept_faces))
