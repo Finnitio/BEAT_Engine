@@ -259,4 +259,18 @@ end
     end
 end
 
+include(joinpath(@__DIR__, "porous_tube_helpers.jl"))
+
+@testset "P2 porous tube: input impedance converges faster than P1" begin
+    # Soft foam one porous wavelength long at 5 kHz (57.5 mm), cubic cells, 1-5 kHz.
+    errors(order, n) = maximum(porous_tube_errors(SOFT_FOAM, order, n; f_max=5000.0, wavelengths=1,
+                                                  frequencies=(1000.0, 3000.0, 5000.0)))
+    p1, p2, p2_fine = errors(1, 6), errors(2, 6), errors(2, 12)
+    # Measured 7.6e-2 (P1), 1.3e-3 and 1.6e-4 (P2): at equal element size P2 is 60x more
+    # accurate and converges at about third order (ratio 8.2 per halving; P1 4.4).
+    @test p2 < 2e-3
+    @test p2 < p1 / 20
+    @test p2_fine < p2 / 6
+end
+
 end # module
