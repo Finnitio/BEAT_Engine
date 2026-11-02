@@ -71,7 +71,7 @@ and are not identifiers. Collection order is preserved by the application adapte
 | Collection | Numerical content |
 |---|---|
 | `meshes` | ID, filename, purpose (`bem_surface` or `fem_volume`), positive scale to meters, three-component translation in meters |
-| `regions` | Bounded/unbounded air, nonempty mesh references, resolved volume groups, positive sound speed and density, loss model |
+| `regions` | Bounded/unbounded air, nonempty mesh references, resolved volume groups, positive sound speed and density, loss model (region material) |
 | `boundaries` | Owning region, resolved surface group, boundary kind and numerical parameters |
 | `interfaces` | Bounded/unbounded boundary references and resolved FEM-to-BEM topology |
 | `components` | Kind, nonempty boundary references, numerical component parameters |
@@ -89,6 +89,15 @@ They do not select formulations or define the authoring-project schema. Existing
 metadata used for result interpretation, such as area normalization, is preserved.
 Producers may put descriptive additions in metadata; numerical features must use
 their defined engine fields/options and satisfy backend capability checks.
+
+### Region materials
+
+A region's `loss_model` is its material: air (`{}`, `{"bulk_loss_factor": η}` or
+`{"model": "air", …}`) or, for bounded regions, a rigid-frame JCA equivalent fluid
+(`{"model": "jca", "frame": "rigid", …}` with five SI parameters). Both validators
+reject unknown models, frames and keys, out-of-range parameters, and wall losses,
+wall impedance or terminations on porous-region boundaries. See
+[Porous Materials](Porous%20Materials.md).
 
 ### Exterior ideal-velocity-source motion
 
