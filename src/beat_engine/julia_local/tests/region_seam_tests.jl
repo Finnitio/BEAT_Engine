@@ -396,7 +396,7 @@ end
     end
 end
 
-@testset "coupled seam with differing bulk loss: per-region operator on CPU, refused on accelerators" begin
+@testset "coupled seam with differing bulk loss: per-region operator on CPU and CUDA, refused on ROCm and Metal" begin
     # CPU coupled solves form each region's bulk loss on its own elements, as interior solves do.
     lossy = Dict{String,Any}("bulk_loss_factor" => 0.05)
     condensed = solve_coupled_workload(split_coupled_request(; upper_loss=lossy)).results
@@ -412,11 +412,22 @@ end
         materials = c["diagnostics"]["fem_region_materials"]
         @test [entry["material"]["bulk_loss_factor"] for entry in materials] == [0.02, 0.05]
     end
-    for backend in ("cuda", "rocm", "metal")
+    for backend in ("rocm", "metal")
         request = split_coupled_request(; upper_loss=lossy)
         request["solver_options"]["bem_backend"] = backend
         @test_throws "joins different bulk loss factors" solve_coupled_workload(request)
     end
+    # CUDA uses the per-region operator too: without a device the solve fails at the first
+    # device call, not at the seam check.
+    request = split_coupled_request(; upper_loss=lossy)
+    request["solver_options"]["bem_backend"] = "cuda"
+    message = try
+        solve_coupled_workload(request)
+        ""
+    catch exception
+        sprint(showerror, exception)
+    end
+    @test occursin("CUDA", message) && !occursin("bulk loss", message)
 end
 
 end # region seams

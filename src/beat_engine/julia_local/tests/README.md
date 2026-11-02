@@ -72,6 +72,10 @@ The existing `BLAB_RUN_COUPLED_CUDA=1`, `BLAB_RUN_COUPLED_ROCM=1` and
 hardware and their corresponding Julia projects. CPU reference success does not
 qualify CUDA, ROCm, or Metal.
 
+`BEAT_RUN_POROUS_CUDA=1` with the `julia_cuda` project runs the porous-region CUDA
+comparison in `porous_coupled_tests.jl` (wrapped by `scripts/compare_porous_backends.py`;
+see `docs/Porous Materials.md`).
+
 The Metal gate runs with the `julia_metal` project on Apple Silicon. Its
 `metal production pipeline` testset solves `off`, `x` and `xy` on the meshes
 that are fundamental domains for each, checks the operators land on the GPU

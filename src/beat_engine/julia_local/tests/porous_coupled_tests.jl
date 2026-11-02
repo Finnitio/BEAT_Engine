@@ -270,4 +270,166 @@ end
     end
 end
 
+"""
+A CPU coupled cache of the radiating tube. With `porous`, the tube's first half is air and its
+second half (the tetrahedra of the slabs nearer the opening) the soft fibrous fill, as two
+per-region materials; otherwise the cache keeps the air operator.
+"""
+function radiating_tube_cache(; porous, bem_backend=:cpu, slabs=12)
+    fem_resource, bem_resource, _ = radiating_tube_meshes(slabs; length_m=0.05, width_m=0.02)
+    fem = translated_volume_mesh(fem_resource, Float64)
+    bem = translated_boundary_mesh(bem_resource, Float64)
+    map = build_conforming_interface_map(fem, bem, 3, 2; coordinate_tolerance=1e-9)
+    half = length(fem.tetrahedra) ÷ 2
+    regions = porous ? (tetrahedron_ranges=[1:half, (half + 1):length(fem.tetrahedra)],
+        materials=[parse_region_material(Dict{String,Any}("bulk_loss_factor" => 0.03), Float64),
+                   parse_region_material(SOFT_FIBROUS, Float64)]) : nothing
+    return prepare_coupled_cache(fem, bem, map; quadrature_order=3, singular_order=3, bem_backend,
+        bulk_loss_factor_by_vertex=fill(0.03, length(fem.vertices)), fem_regions=regions)
+end
+
+@testset "FEM operator terms (device scatter blocks) sum to the host operator on one pattern" begin
+    for porous in (false, true)
+        cache = radiating_tube_cache(; porous)
+        blocks = coupled_fem_operator_blocks(cache)
+        @test length(blocks) == (porous ? 4 : 3)
+        patterns = Set{Tuple{Vector{Int},Vector{Int}}}()
+        for frequency in (200.0, 700.0, 1500.0)
+            omega = 2pi * frequency
+            host = coupled_fem_dynamic_stiffness(cache, omega, C0, RHO0)
+            coefficients = coupled_fem_operator_coefficients(cache, omega, C0, RHO0)
+            @test length(coefficients) == length(blocks)
+            # The device path scatters each block with its coefficient into the dense system.
+            scattered = zeros(ComplexF64, size(host))
+            for (block, coefficient) in zip(blocks, coefficients)
+                rows, columns, values = findnz(block)
+                for (row, column, value) in zip(rows, columns, values)
+                    scattered[row, column] += coefficient * value
+                end
+            end
+            @test scattered ≈ Matrix(host) rtol=1e-13
+            # The cuDSS and MUMPS symbolic analyses are reused when the pattern is unchanged.
+            push!(patterns, (copy(host.colptr), copy(host.rowval)))
+        end
+        @test length(patterns) == 1
+        porous && @test all(block -> (block.colptr, block.rowval) == only(patterns), blocks)
+    end
+end
+
+@testset "per-region coupled caches: CPU and CUDA only, ROCm and Metal refuse by name" begin
+    for backend in (:rocm, :metal)
+        @test_throws "not supported on the $backend backend" radiating_tube_cache(; porous=true, bem_backend=backend)
+    end
+    message = try
+        radiating_tube_cache(; porous=true, bem_backend=:cuda)
+        ""
+    catch exception
+        sprint(showerror, exception)
+    end
+    # Without CUDA.jl the cache stops at its first device allocation, past the material check.
+    @test occursin("CUDA", message) && !occursin("not supported on the cuda backend", message)
+end
+
+"""
+The tiny coupled workload with its FEM cube split by a region seam: the six tetrahedra on the
+interface face stay air (`region:interior`), the other ten are the soft fibrous fill
+(`region:upper`, volume tag 6) with the radiator and the rigid walls.
+"""
+function porous_seam_request(; static_condensation=true, precision="float64")
+    request = JSON.parse(JSON.json(coupled_workload_request(; tiny=true)))
+    request["solver_options"]["precision"] = precision
+    request["solver_options"]["static_condensation"] = static_condensation
+    system = request["compiled_system"]
+    fem = only(m for m in system["meshes"] if m["id"] == "mesh:interior")
+    tetra = only(c for c in fem["mesh_data"]["cells"] if c["type"] == "tetra")
+    tetra["physical_tags"] = coupled_workload_packed(Int64[fill(1, 6); fill(6, 10)], "<i8")
+    fem["mesh_data"]["physical_names"]["Upper"] = [6, 3]
+    interior = only(r for r in system["regions"] if r["id"] == "region:interior")
+    upper = deepcopy(interior)
+    upper["id"], upper["name"], upper["loss_model"] = "region:upper", "Upper", SOFT_FIBROUS
+    upper["volume_groups"] = [Dict("mesh_id" => "mesh:interior", "dimension" => 3, "tag" => 6, "name" => "Upper")]
+    push!(system["regions"], upper)
+    for boundary in system["boundaries"]
+        boundary["id"] in ("boundary:radiator", "boundary:wall") && (boundary["region_id"] = "region:upper")
+    end
+    return request
+end
+
+@testset "porous seam in a coupled CPU solve: monolithic equals condensed" begin
+    condensed = solve(porous_seam_request())
+    monolithic = solve(porous_seam_request(; static_condensation=false))
+    air = solve(JSON.parse(JSON.json(coupled_workload_request(; tiny=true))))
+    @test length(condensed) == length(monolithic) == 2
+    for (c, m, a) in zip(all_values(condensed), all_values(monolithic), all_values(air))
+        @test c ≈ m rtol=1e-9
+        # The fill changes the result (the air workload differs at O(1)).
+        @test !isapprox(c, a; rtol=1e-2)
+    end
+    @test only(condensed[1]["diagnostics"]["fem_region_seams"])["region_ids"] == ["region:interior", "region:upper"]
+    single = withenv("BLAB_COUPLED_FEM_FLOAT64" => "on") do
+        solve(porous_seam_request(; precision="float32"))
+    end
+    for (c, s) in zip(all_values(condensed), all_values(single))
+        @test s ≈ c rtol=1e-4
+    end
+end
+
+"""
+    porous_backend_comparison(backend; tube_frequencies)
+
+Solve the porous tube and the air|porous seam workload on `backend` (monolithic and condensed,
+Float64 and Float32) and report, per result, the relative difference to the CPU Float64 solve
+of the same formulation and whether the condensed sweep reused the FEM symbolic analysis. The manual CUDA check
+(BEAT_RUN_POROUS_CUDA=1 in the CUDA environment; scripts/compare_porous_backends.py) runs it
+with `"cuda"`; the CPU suite runs it with `"cpu"` so the check itself stays exercised.
+"""
+function porous_backend_comparison(backend; tube_frequencies=(200.0, 700.0, 1500.0))
+    report = NamedTuple[]
+    cases = [
+        ("porous tube", condensed -> first(radiating_tube_request(SOFT_FIBROUS;
+            frequencies=tube_frequencies, static_condensation=condensed))),
+        ("air/porous seam", condensed -> begin
+            porous_seam_request(; static_condensation=condensed)
+        end),
+    ]
+    for (name, make) in cases, condensed in (false, true)
+        reference = all_values(solve(make(condensed)))
+        for precision in ("float64", "float32")
+            request = make(condensed)
+            request["solver_options"]["precision"] = precision
+            request["solver_options"]["bem_backend"] = backend
+            results = solve(request)
+            for (index, (a, b)) in enumerate(zip(reference, all_values(results)))
+                diagnostics = results[index]["diagnostics"]
+                push!(report, (case=name, condensed, precision, frequency_index=index,
+                    finite=all(isfinite, b), relative_difference=norm(b - a) / norm(a),
+                    analysis_reused=diagnostics["fem_symbolic_analysis_reused"],
+                    materials=haskey(diagnostics, "fem_region_materials")))
+            end
+        end
+    end
+    return report
+end
+
+@testset "porous backend comparison runs (CPU against itself)" begin
+    rows = porous_backend_comparison("cpu"; tube_frequencies=(700.0,))
+    @test length(rows) == 2 * 2 * (1 + 2)
+    @test all(row -> row.finite && row.materials, rows)
+    # The CUDA tolerances below hold for the CPU paths themselves.
+    @test all(row -> row.relative_difference < (row.precision == "float64" ? 1e-12 : 2e-3), rows)
+end
+
+if get(ENV, "BEAT_RUN_POROUS_CUDA", "0") == "1"
+    @testset "porous regions on CUDA agree with CPU (monolithic, condensed; float64, float32)" begin
+        @test BeatEngineCore.cuda_module().functional()
+        for row in porous_backend_comparison("cuda")
+            @info "porous CUDA vs CPU Float64" row
+            @test row.finite && row.materials
+            @test row.relative_difference < (row.precision == "float64" ? 1e-8 : 2e-3)
+            # A condensed sweep analyses the FEM pattern once and refactors afterwards.
+            row.condensed && @test row.analysis_reused == (row.frequency_index > 1)
+        end
+    end
+end
+
 end # module

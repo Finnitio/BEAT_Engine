@@ -1722,9 +1722,9 @@ function find_region_seams(records)
 end
 
 """
-The accelerator coupled FEM caches scale mass rows by a per-node bulk loss factor, which is
-single-valued at a seam node only when both regions agree. Interior and CPU coupled solves use
-per-region element operators and accept any factors.
+The ROCm and Metal coupled FEM caches scale mass rows by a per-node bulk loss factor, which is
+single-valued at a seam node only when both regions agree. Interior, CPU and CUDA coupled
+solves use per-region element operators and accept any factors.
 """
 function require_uniform_seam_bulk_loss(fem_domains)
     factor(id) = only(domain.material.bulk_loss_factor for domain in fem_domains.domains if domain.id == id)
@@ -2926,14 +2926,14 @@ function solve_request_impl(request; event_mode=false)
     bem_backend = Symbol(lowercase(String(get(solver_options, "bem_backend", "cpu"))))
     bem_backend in (:cpu, :cuda, :rocm, :metal) ||
         error("Unsupported coupled BEM backend: $bem_backend. Expected cpu, cuda, rocm, or metal.")
-    # The CPU coupled paths (condensed and monolithic) form per-region material operators;
-    # the accelerator paths do not yet, so refuse rather than solve a porous fill as air.
+    # The CPU and CUDA coupled paths (condensed and monolithic) form per-region material
+    # operators. ROCm and Metal are not qualified for porous regions yet: refuse rather than
+    # solve a porous fill unverified (the worker's backend capabilities say the same).
     porous_region_ids = [String(region["id"]) for region in bounded_regions
                          if is_porous(parse_region_material(region["loss_model"], Float64))]
-    isempty(porous_region_ids) || bem_backend == :cpu || error(
-        "Porous region materials in coupled FEM-BEM solves are currently supported only on the CPU " *
-        "backend; the $(bem_backend) backend does not support porous regions " *
-        "$(join(repr.(porous_region_ids), ", ")) yet.")
+    isempty(porous_region_ids) || bem_backend in PER_REGION_COUPLED_BACKENDS || error(
+        "Porous region materials are not supported on the $(bem_backend) backend in coupled FEM-BEM " *
+        "solves (regions $(join(repr.(porous_region_ids), ", "))); use the cpu or cuda backend.")
     symmetry_mode = BeatEngineCore.normalized_symmetry_mode(
         get(solver_options, "symmetry", "off"),
     )
@@ -2960,11 +2960,11 @@ function solve_request_impl(request; event_mode=false)
         moving_boundary_ids=Set(String(id) for component in components for id in component["boundary_ids"]),
     )
     fem_mesh = fem_domains.mesh
-    # Per-region materials (CPU) for requests with porous regions or region seams, as in the
-    # interior solve: each region's air bulk loss then acts on its own elements. Requests with
-    # neither keep the original air operator arithmetic (bit-identical results). Accelerator
-    # backends still scale mass rows per node, so their seams need equal bulk loss.
-    coupled_per_region = bem_backend == :cpu &&
+    # Per-region materials (CPU, CUDA) for requests with porous regions or region seams, as in
+    # the interior solve: each region's air bulk loss then acts on its own elements. Requests
+    # with neither keep the original air operator arithmetic (bit-identical results). ROCm and
+    # Metal still scale mass rows per node, so their seams need equal bulk loss.
+    coupled_per_region = bem_backend in PER_REGION_COUPLED_BACKENDS &&
                          (fem_domains.has_porous_regions || !isempty(fem_domains.region_seams))
     coupled_per_region || require_uniform_seam_bulk_loss(fem_domains)
     coupled_fem_regions = coupled_per_region ? (

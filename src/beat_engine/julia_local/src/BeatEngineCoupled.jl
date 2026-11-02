@@ -35,6 +35,9 @@ export VolumeMesh,
     blend_fem_mass_matrix,
     assemble_fem_dynamic_stiffness,
     coupled_fem_dynamic_stiffness,
+    coupled_fem_operator_blocks,
+    coupled_fem_operator_coefficients,
+    PER_REGION_COUPLED_BACKENDS,
     assemble_boundary_mass_matrix,
     assemble_boundary_tangential_stiffness,
     prepare_thermoviscous_operator,
@@ -1146,6 +1149,50 @@ function coupled_fem_dynamic_stiffness(prepared, omega, sound_speed, density)
     )
 end
 
+"""
+Coupled backends whose FEM operator can be formed per region (`fem_regions`): CPU forms it on
+the host, CUDA scatters the same per-region blocks on the device. ROCm and Metal are not
+qualified for porous regions yet.
+"""
+const PER_REGION_COUPLED_BACKENDS = (:cpu, :cuda)
+
+"""
+    coupled_fem_operator_blocks(prepared)
+
+Frequency-invariant sparse blocks of the coupled FEM volume operator, in the order of
+`coupled_fem_operator_coefficients`: `K, M, D_eta M` for the air operator, or `K_r, M_r` per
+region (all on the shared air pattern) when `prepared.region_operator` is set. The device
+monolithic path caches one scatter block each; `sum_i c_i B_i` is `coupled_fem_dynamic_stiffness`.
+"""
+function coupled_fem_operator_blocks(prepared)
+    operator = prepared.region_operator
+    isnothing(operator) && return [prepared.stiffness, prepared.mass, prepared.bulk_loss_mass]
+    block(values) = SparseMatrixCSC(operator.order, operator.order, copy(operator.colptr), copy(operator.rowval), copy(values))
+    return [block(values) for (stiffness, mass) in zip(operator.stiffness_values, operator.mass_values)
+            for values in (stiffness, mass)]
+end
+
+"""
+    coupled_fem_operator_coefficients(prepared, omega, sound_speed, density)
+
+Complex coefficients of `coupled_fem_operator_blocks` at `omega`: `1, -k^2, -i sign k^2` for
+air, or the per-region `a_r, b_r` of `region_operator_coefficients` (docs/Porous Materials.md).
+"""
+function coupled_fem_operator_coefficients(prepared, omega, sound_speed, density)
+    T = real(eltype(prepared.mass))
+    operator = prepared.region_operator
+    if isnothing(operator)
+        wavenumber = T(omega) / T(sound_speed)
+        return Complex{T}[one(T), -(wavenumber^2), Complex{T}(0, -propagation_sign() * wavenumber^2)]
+    end
+    coefficients = Complex{T}[]
+    for material in operator.materials
+        region = region_operator_coefficients(material, T(omega), density, sound_speed)
+        push!(coefficients, Complex{T}(region.stiffness), Complex{T}(region.mass))
+    end
+    return coefficients
+end
+
 # Diagnostics retain the individual operators needed for replay/residual checks.
 function resolve_coupled_bem_assembly(mode::Symbol, backend::Symbol, diagnostics::Bool)
     mode in (:auto, :combined, :operators) || error(
@@ -1174,9 +1221,9 @@ function prepare_coupled_cache(
     )
     bem_backend in (:cpu, :cuda, :rocm, :metal) ||
         error("Unsupported coupled BEM backend: $bem_backend. Expected :cpu, :cuda, :rocm, or :metal.")
-    isnothing(fem_regions) || bem_backend == :cpu || error(
-        "Per-region FEM material operators in coupled solves are currently supported only on the " *
-        "CPU backend; got $bem_backend.",
+    isnothing(fem_regions) || bem_backend in PER_REGION_COUPLED_BACKENDS || error(
+        "Per-region FEM material operators (porous regions, region seams) are not supported on " *
+        "the $bem_backend backend in coupled solves; use the cpu or cuda backend.",
     )
     resolve_coupled_bem_assembly(coupled_bem_assembly, bem_backend, false)
     normalized_symmetry = BeatEngineCore.normalized_symmetry_mode(symmetry_mode)
@@ -1358,10 +1405,11 @@ function prepare_coupled_cache(
                              build_cuda_sparse_scatter_cache :
                              build_rocm_sparse_scatter_cache
         gamma = Int.(collect(retained_fem_vertices))
+        # The FEM volume operator as frequency-invariant blocks (air: K, M, D_eta M; per region:
+        # K_r, M_r), scattered with per-frequency coefficients by `build_coupled_system`.
         device_sparse_blocks = (
-            stiffness=build_sparse_cache(stiffness),
-            mass=build_sparse_cache(mass),
-            bulk_loss_mass=build_sparse_cache(bulk_loss_mass),
+            fem_operator=[build_sparse_cache(block) for block in coupled_fem_operator_blocks((
+                stiffness=stiffness, mass=mass, bulk_loss_mass=bulk_loss_mass, region_operator=region_operator))],
             wall_impedance=[
                 build_sparse_cache(operator.matrix)
                 for operator in wall_impedance_operators
@@ -1472,7 +1520,7 @@ function release_coupled_cache!(cache)
         release_rocm_burton_miller_identity_cache!(cache.device_identity_cache)
         BeatEngineCore.amdgpu_module().unsafe_free!(cache.device_bem_flux)
         for (name, sparse_cache) in pairs(cache.device_sparse_blocks)
-            if name in (:wall_impedance, :thermoviscous)
+            if name in (:fem_operator, :wall_impedance, :thermoviscous)
                 for wall_cache in sparse_cache
                     release_rocm_sparse_scatter_cache!(wall_cache)
                 end
@@ -1549,7 +1597,7 @@ function release_coupled_cache!(cache)
     cache.device_bem_flux === nothing || BeatEngineCore.cuda_module().unsafe_free!(cache.device_bem_flux)
     BeatEngineCore.release_cuda_bem_flux_cache!(cache.device_bem_flux_sparse)
     for (name, sparse_cache) in pairs(cache.device_sparse_blocks)
-        if name in (:wall_impedance, :thermoviscous)
+        if name in (:fem_operator, :wall_impedance, :thermoviscous)
             for wall_cache in sparse_cache
                 release_cuda_sparse_scatter_cache!(wall_cache)
             end
@@ -2462,22 +2510,13 @@ function build_coupled_system(
                     row_offset=first(flux_range) - 1,
                 )
             else
-                scatter_sparse!(
-                    d_coupled,
-                    prepared.device_sparse_blocks.stiffness,
-                )
-                scatter_sparse!(
-                    d_coupled,
-                    prepared.device_sparse_blocks.mass;
-                    alpha=Complex{T}(-(wavenumber^2), 0),
-                    add=true,
-                )
-                scatter_sparse!(
-                    d_coupled,
-                    prepared.device_sparse_blocks.bulk_loss_mass;
-                    alpha=Complex{T}(0, -propagation_sign() * (wavenumber^2)),
-                    add=true,
-                )
+                # Same terms as the host `coupled_fem_dynamic_stiffness`: air or per region.
+                for (index, (block, coefficient)) in enumerate(zip(
+                    prepared.device_sparse_blocks.fem_operator,
+                    coupled_fem_operator_coefficients(prepared, omega, sound_speed, density),
+                ))
+                    scatter_sparse!(d_coupled, block; alpha=coefficient, add=index > 1)
+                end
                 if !isnothing(prepared.thermoviscous_operator)
                     tv = thermoviscous_coefficients(frequency_hz, sound_speed, density)
                     for (block, coefficient) in zip(prepared.device_sparse_blocks.thermoviscous,

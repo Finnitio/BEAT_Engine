@@ -42,7 +42,10 @@ Workers advertise `fem_region_material_models: ["air", "jca", "jcal"]` and
 `fem_region_material_frames: ["rigid", "limp"]`. The Python engine client refuses a porous
 request before submission unless the worker advertises its model and frame, so an
 older engine (which ignored the keys) never solves a porous fill as air. Air
-requests need no capability.
+requests need no capability. A backend entry in the ready event may narrow the list:
+ROCm and Metal announce `fem_region_material_models: ["air"]`, so the client refuses
+a coupled porous request on them before submission, naming the backend; CPU and CUDA
+omit the key and use the worker list. Interior solves always run on CPU.
 
 ## Equivalent fluid
 
@@ -233,11 +236,33 @@ per wavelength misses it.
 - Interior FEM solves, CPU.
 - Coupled FEM–BEM solves on the CPU backend (condensed and monolithic, Float64 and
   Float32), including porous regions that reach an interface to the exterior.
-- Coupled solves on CUDA, ROCm and Metal refuse porous regions before mesh or device
-  setup, rather than solving the fill as air.
-- Region seams work in interior solves and in CPU coupled FEM–BEM solves (any region
-  materials; each region's bulk loss acts on its own elements). On accelerator coupled
-  backends seams need equal bulk loss on both sides.
+- Coupled FEM–BEM solves on CUDA (monolithic and cuDSS condensed), implemented but
+  qualified only by the manual hardware check below; there is no CUDA run in CI.
+- Coupled solves on ROCm and Metal refuse porous regions before mesh or device setup
+  ("Porous region materials are not supported on the metal backend ..."), rather than
+  solving the fill unverified.
+- Region seams work in interior solves and in CPU and CUDA coupled FEM–BEM solves (any
+  region materials; each region's bulk loss acts on its own elements). On ROCm and Metal
+  seams need equal bulk loss on both sides.
+- Deploy and speaker-ROM evaluation do not form the FEM operator (exterior/ROM only); the
+  ROM export reads the condensed CPU system, which already carries the porous operator.
+
+**Backends.** Every path forms the same operator on the air pattern. The host builds
+`sum_r a_r K_r + b_r M_r` (`coupled_fem_dynamic_stiffness`), which the CPU monolithic and
+condensed solves, the Float64 FEM reassembly and the CUDA cuDSS condensation consume. The
+CUDA monolithic path scatters frequency-invariant device blocks (`coupled_fem_operator_blocks`:
+`K, M, D_eta M` for air, `K_r, M_r` per region) with per-frequency coefficients
+(`coupled_fem_operator_coefficients`); the CPU suite checks that this scatter equals the host
+operator. Because only values change with frequency, `colptr`/`rowval` are identical at every
+frequency, which is what the cuDSS (and MUMPS) symbolic-analysis reuse compares
+(`fem_symbolic_analysis_reused` in the diagnostics).
+
+**Manual CUDA check.** On a machine with a functional CUDA environment, run
+`python scripts/compare_porous_backends.py`. It runs `porous_coupled_tests.jl` in the CUDA
+Julia environment with `BEAT_RUN_POROUS_CUDA=1`: the radiating porous tube (200, 700,
+1500 Hz) and the air|porous seam workload, monolithic and condensed, Float64 and Float32,
+each against the CPU Float64 solve (tolerance 1e-8 for Float64, 2e-3 for Float32), and the
+condensed sweeps must report `fem_symbolic_analysis_reused` from the second frequency on.
 
 ## Validation
 
@@ -267,8 +292,8 @@ per wavelength misses it.
   ratio 4.0); the references differ from rigid JCA by 1.4–4.4 % (JCAL) and 2.9–36 %
   (limp) over the band, so the check discriminates. Further tests: an air tube anchors the piston sign, air and porous regions in one
   request match their separate solves, the porous operator keeps the air pattern,
-  legacy and explicit air are bit-identical, accelerator coupled backends refuse
-  porous regions, and P2 (ten-node) tetrahedra in the porous operator: the soft-foam
+  legacy and explicit air are bit-identical, ROCm and Metal coupled solves refuse
+  porous regions naming the backend while CUDA passes the material checks, and P2 (ten-node) tetrahedra in the porous operator: the soft-foam
   tube at 6 elements per wavelength (mean edge, cubic cells) is 60 times more accurate
   than P1 and converges at about third order.
 - `porous_coupled_tests.jl`: a 20 mm square tube, 50 mm long, completely filled with
@@ -305,4 +330,10 @@ per wavelength misses it.
   one-sided assignment errors with both region ids; a coupled FEM–BEM solve of the tiny
   workload split into two seam-joined regions equals the single-region solve (rtol 1e-9); on
   CPU differing bulk loss across a coupled seam is accepted (monolithic equals condensed,
-  rtol 1e-9) and on accelerator backends it is rejected.
+  rtol 1e-9); on ROCm and Metal it is rejected, CUDA passes the seam check.
+- `porous_coupled_tests.jl` (backends): the CUDA scatter blocks with their coefficients
+  sum to the host operator (rtol 1e-13, air and air|porous caches) on one pattern at
+  200, 700 and 1500 Hz; per-region caches refuse ROCm and Metal by name; an air|porous
+  seam in the tiny coupled workload gives monolithic equal to condensed (rtol 1e-9) and
+  Float32 with the Float64 FEM reassembly within 1e-4; the backend comparison used by the
+  manual CUDA check runs on CPU (Float64 within 1e-12, Float32 within 2e-3 of CPU Float64).
