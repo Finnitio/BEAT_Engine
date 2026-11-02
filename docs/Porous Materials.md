@@ -1,4 +1,4 @@
-# Porous materials: implementation notes
+# Porous materials
 
 A bounded region's `loss_model` names its **material**. Air is the default; a
 porous fill is modelled as an equivalent fluid, Johnson–Champoux–Allard (JCA) or
@@ -47,11 +47,29 @@ ROCm and Metal announce `fem_region_material_models: ["air"]`, so the client ref
 a coupled porous request on them before submission, naming the backend; CPU and CUDA
 omit the key and use the worker list. Interior solves always run on CPU.
 
+## Conventions
+
+**Equivalent fluid.** A porous region is a fluid with the complex, frequency-dependent
+*equivalent* density and bulk modulus ρ_eq = ρ/φ and K_eq = K/φ (Eqs. 5.43, 5.44), where
+ρ and K are the effective density and bulk modulus of the air in the pores (Eqs. 5.50,
+5.51). The unknown is the pore pressure p, the velocity is the macroscopic (volume-averaged)
+velocity v = φ v_pore, and jω ρ_eq v = −∇p, ∇·v = −jω p / K_eq. Pressure and normal volume
+velocity are then continuous at the material's surface, so the layer can be replaced by this
+homogeneous fluid without changing the field outside it (Sec. 5.7; Z_c = √(ρ_eq K_eq) is the
+book's Z_c/φ, Eq. 5.42, and k_c = ω √(ρ_eq/K_eq), Eq. 5.41). This is the form the FEM
+weak form needs: no porosity factor appears at a region seam or an FEM–BEM interface.
+
+**Phasor.** The book writes fields as e^{+jωt} (so Im ρ_eq < 0 for a passive material).
+The engine evaluates every formula with jω = `time_derivative(ω)` of the request's
+`solver_options.phasor_convention` (docs/Phasor Convention.md): with `exp(+i omega t)`,
+which Boundary Lab sends, every complex quantity equals the book's with j = i; with the
+legacy default `exp(-i omega t)` every quantity, ρ_eq and K_eq in the diagnostics
+included, is its complex conjugate. The tests check both conventions.
+
 ## Equivalent fluid
 
 One JCAL evaluation path computes, with jω the time derivative of the active phasor
-convention (the book's e^{+jωt}; the legacy e^{−iωt} convention conjugates every
-quantity):
+convention:
 
 ```
 rho(w) = rho0 [alpha + nu phi / (j w q0) G(w)],   q0 = eta / sigma,  nu = eta / rho0        (5.50, 5.52)
@@ -104,9 +122,9 @@ the FEM-side flux ρ0 (1/ρ_eq) ∂p/∂n, which equals the exterior air's ∂p/
 normal velocity is continuous, so the interface flux blocks, BEM coupling and
 `interface_average_normal_velocity` (flux / `neumann_scale(ρ0, ω)`) are unchanged:
 the porous region enters the coupling only through ρ_eq in its volume operator. The
-CPU coupled caches (`prepare_coupled_cache`, used by the monolithic and condensed
-builders) hold the per-region operator when the request has porous regions, and
-`coupled_fem_dynamic_stiffness` forms it per frequency. The Float64 FEM reassembly
+coupled caches (`prepare_coupled_cache`, used by the monolithic and condensed
+builders) hold the per-region operator on CPU and CUDA when the request has porous
+regions or region seams, and `coupled_fem_dynamic_stiffness` forms it per frequency. The Float64 FEM reassembly
 for Float32 runs (`BLAB_COUPLED_FEM_FLOAT64`) reassembles each region's `K_r`/`M_r`
 in Float64 on the same pattern. Coupled FEM mass is always consistent.
 
@@ -136,13 +154,14 @@ the face carries a tag that the region assigns to one of its boundaries:
 Faces of regions on different meshes are never seams. A node on a seam face is shared by
 every region on that mesh that contains it.
 
-**Bulk loss at seam nodes.** The interior operator for a request with seams is the region
-operator above, so each region's `bulk_loss_factor` acts on its own elements
-(b_r M_r): a seam node gets each side's mass contribution with that side's factor, and
-regions with different factors (air|air or air|porous) are well defined. The coupled FEM–BEM
-caches still scale mass rows per node; there a seam between regions with different bulk loss
-factors is rejected ("joins different bulk loss factors"), equal factors are exact. The
-aggregate's per-node `bulk_loss_factor_by_vertex` holds the first region's factor at seam nodes.
+**Bulk loss at seam nodes.** Interior solves and CPU and CUDA coupled solves of a request
+with seams use the region operator above, so each region's `bulk_loss_factor` acts on its
+own elements (b_r M_r): a seam node gets each side's mass contribution with that side's
+factor, and regions with different factors (air|air or air|porous) are well defined. The
+ROCm and Metal coupled caches still scale mass rows per node; there a seam between regions
+with different bulk loss factors is rejected ("joins different bulk loss factors"), equal
+factors are exact. The aggregate's per-node `bulk_loss_factor_by_vertex` holds the first
+region's factor at seam nodes.
 
 **Output layout.** `fem_nodal_pressure` keeps one row per region-local vertex, regions
 contiguous in request order (`region_ids`, `node_offsets`, `node_counts`), region-local order
@@ -263,6 +282,107 @@ Julia environment with `BEAT_RUN_POROUS_CUDA=1`: the radiating porous tube (200,
 1500 Hz) and the air|porous seam workload, monolithic and condensed, Float64 and Float32,
 each against the CPU Float64 solve (tolerance 1e-8 for Float64, 2e-3 for Float32), and the
 condensed sweeps must report `fem_symbolic_analysis_reused` from the second frequency on.
+
+## Performance
+
+Measured with the tools and procedure of [Benchmarking](Benchmarking.md): sweep 1 of a
+fresh worker per run, runs of all configurations interleaved round by round
+(`scripts/benchmark_matrix.py`), 12 log-spaced frequencies 20 Hz–20 kHz,
+`exp(+i omega t)` as Boundary Lab sends it, coupled solves in Float32 (condensed, the
+Boundary Lab default) and interior solves in Float64.
+
+**Machine (CPU).** AMD Ryzen 9 5900X, Linux VM with 4 cores exposed (1 thread per core),
+7.6 GiB RAM, Linux 7.0.14; Julia 1.12.7, `--threads=4` (the worker sets BLAS threads to the
+Julia thread count), CPython 3.12. Memory is the worker's peak RSS over the sweep.
+
+**Air-only regression** (branch against v0.7.0, `c82bb7a`, 3 interleaved runs each):
+
+| Workload | Path | c82bb7a wall, median (range) | Branch wall | Change | Peak memory | Outputs |
+|---|---|---|---|---|---|---|
+| `Multi_region_SAWMOD` (4 regions, 3 drivers, xy symmetry) | coupled, condensed, Float32 | 306.7 s (305.4–307.1, ±0.3 %) | 307.4 s (305.7–310.3, ±0.7 %) | within variance (0.2 %) | 2252 / 2066 MB | bit-identical |
+| `compression_driver` (2 regions, termination) | interior, Float64 | 0.20 s (0.17–0.21, ±9.6 %) | 0.21 s (0.21–0.22, ±3.1 %) | within variance | 527 / 524 MB | bit-identical |
+
+Both are bit-identical to the base engine, so the accuracy against the base Float64 CPU
+reference is the same for both (SAWMOD Float32: exterior pressure 1.3e-5 relative,
+0.002 dB). The SAWMOD sections agree to within 1 % each (BEM operator 137.4 / 138.1 s,
+FEM condensation 55.4 / 56.0 s, field 89.8 / 89.8 s); the run-to-run half-range is ±0.7 %.
+
+**Porous overhead.** One project per path, the porous body as Air (the captured project,
+unchanged), JCA, JCAL (k0′ = 2e-9 m²) and JCA on a limp frame (ρ1 = 30 kg/m³), soft
+fibrous material of Table 11.2 (`scripts/porous_benchmark_requests.py`). "Per frequency" is
+the mean over the 12 frequencies of the worker's `assembly_s + solve_s + field_s`; the
+operator column is the mean per frequency of `fem_system_s + fem_matrix_cache_s +
+cache_setup_s` (the per-region operator formation and its one-off cache):
+
+| Workload | Material | Runs | Wall, median (range) | Per frequency | vs Air | FEM task / freq | Operator / freq | Peak memory |
+|---|---|---|---|---|---|---|---|---|
+| `Simple_Sealed`, rear 52 mm of the box (12 474 of 55 356 tets) a porous layer joined by a region seam (727 seam nodes); coupled through the driver | Air, one region (original operator) | 3 | 12.28 s (12.23–12.49) | 988 ms | — | 335 ms | 18 ms | 1103 MB |
+| | Air, two regions + seam | 3 | 36.13 s (35.97–36.30) | 971 ms | (reference) | 324 ms | 47 ms | 1061 MB |
+| | JCA | 3 | 36.13 s (35.92–36.17) | 976 ms | +0.5 % | 327 ms | 44 ms | 1053 MB |
+| | JCAL | 3 | 36.03 s (35.93–36.18) | 962 ms | −0.9 % | 332 ms | 42 ms | 1037 MB |
+| | JCA limp | 3 | 36.09 s (36.08–36.38) | 973 ms | +0.2 % | 341 ms | 48 ms | 1045 MB |
+| `Multi_region_SAWMOD`, sealed main chamber (11 020 tets) stuffed | Air | 1 | 306.2 s | 25.42 s | (reference) | 4.64 s | 60 ms | 2100 MB |
+| | JCA | 1 | 305.4 s | 25.34 s | −0.3 % | 4.66 s | 83 ms | 2136 MB |
+| | JCAL | 1 | 305.9 s | 25.39 s | −0.1 % | 4.61 s | 74 ms | 2062 MB |
+| | JCA limp | 1 | 305.1 s | 25.31 s | −0.4 % | 4.53 s | 78 ms | 2137 MB |
+| `compression_driver`, rear chamber (1 780 tets) filled; interior | Air | 3 | 0.22 s (0.21–0.22) | 9.8 ms | (reference) | — | 0.6 ms | 524 MB |
+| | JCA | 3 | 0.22 s (0.22–0.22) | 10.3 ms | +5 % (ranges overlap) | — | 1.1 ms | 526 MB |
+| | JCAL | 3 | 0.22 s (0.21–0.23) | 9.8 ms | −0.3 % | — | 1.1 ms | 522 MB |
+| | JCA limp | 3 | 0.22 s (0.21–0.22) | 9.8 ms | +0.4 % | — | 1.1 ms | 521 MB |
+
+Per frequency, every porous variant is within run-to-run variance of the same mesh with
+Air, so the 10 % target holds without optimization. Peak memory is within 2 % of the
+same-mesh Air run, inside the run-to-run spread (SAWMOD air-only runs: 2039–2269 MB). SAWMOD was run
+once per configuration, as Benchmarking allows once the variance of the workload is
+established (±0.7 % above). The per-region operator
+`sum_r a_r K_r + b_r M_r` costs 15–30 ms per frequency more than the original air
+arithmetic on these meshes (operator column), against 0.3–4.6 s of FEM condensation;
+storing `K_r`, `M_r` as full-length value arrays on the shared pattern costs
+2 R nnz values, a few MB here.
+
+The only large difference is outside the frequency loop: the split `Simple_Sealed`
+requests carry the mesh inline (`mesh_data`, 3.7 MB), and the worker spends about 24 s per
+request hashing that payload for provenance (`mesh_provenance` in
+`BeatEngineMeshData.jl`: `sha256(JSON.json(mesh["mesh_data"]))`). The same one-region
+request with the mesh inline instead of as a file pays the same 24 s, so it is a cost of
+the in-memory mesh transport (unchanged since v0.7.0), not of seams or porous materials.
+It is left for its own performance change.
+
+**Reproduce (CPU or CUDA).** In a Boundary Lab environment that has this engine
+installed (the capture and split scripts import `blab`, `meshio` and `numpy`), from the
+Boundary Lab checkout, with `<engine>` the engine checkout:
+
+```
+python <engine>/scripts/capture_boundary_lab_request.py examples/Multi_region_SAWMOD/Multi_region_SAWMOD.blab.json --out req/sawmod.json
+python <engine>/scripts/capture_boundary_lab_request.py examples/Simple_Sealed/simple_sealed.blab.json --out req/simple_sealed.json
+python <engine>/scripts/capture_boundary_lab_request.py examples/compression_driver/compression_driver.blab.json --out req/compression_driver.json
+python <engine>/scripts/porous_benchmark_requests.py req/sawmod.json --body region:sealedmainchamber --out-dir porous
+python <engine>/scripts/porous_benchmark_requests.py req/simple_sealed.json --body region:interior-air-1 --split-below-m -0.2 --out-dir porous
+python <engine>/scripts/porous_benchmark_requests.py req/compression_driver.json --body region:rear --out-dir porous
+
+python <engine>/scripts/benchmark_matrix.py --backend cuda --runs 3 --out-dir runs/porous_ss --config "Air=porous/simple_sealed_air.json" --config "JCA=porous/simple_sealed_jca.json" --config "JCAL=porous/simple_sealed_jcal.json" --config "JCA limp=porous/simple_sealed_limp.json"
+python <engine>/scripts/benchmark_matrix.py --backend cuda --runs 3 --out-dir runs/porous_sawmod --config "Air=porous/sawmod_air.json" --config "JCA=porous/sawmod_jca.json" --config "JCAL=porous/sawmod_jcal.json" --config "JCA limp=porous/sawmod_limp.json"
+python <engine>/scripts/benchmark_matrix.py --backend cuda --runs 3 --out-dir runs/regression_sawmod --config "v0.7.0=porous/sawmod_air.json@<v0.7.0 checkout>/src" --config "branch=porous/sawmod_air.json"
+```
+
+`--backend cpu` reproduces the CPU table; `--threads` sets the Julia threads (default 4).
+The same commands work in PowerShell and cmd. The interior `compression_driver` variants
+always solve on CPU, so they need no CUDA run. Windows reports memory as unavailable. The
+`--split-below-m` split writes a new mesh for the layer: on another mesh pick a coordinate
+that leaves only rigid boundaries in the layer (the script stops otherwise).
+
+### CUDA (user measurement, pending)
+
+To be filled in from a Windows CUDA machine with the commands above (`--backend cuda`),
+plus `python scripts/compare_porous_backends.py` for the CUDA accuracy check.
+
+| Workload | Material | Runs | Wall, median (range) | Per frequency | vs Air | Peak memory |
+|---|---|---|---|---|---|---|
+| `Simple_Sealed` + porous layer | Air / JCA / JCAL / JCA limp | | | | | |
+| `Multi_region_SAWMOD`, stuffed chamber | Air / JCA / JCAL / JCA limp | | | | | |
+| `Multi_region_SAWMOD` regression | v0.7.0 / branch | | | | | |
+
+Machine: GPU, CPU, cores, RAM, driver/CUDA version, Julia version, threads.
 
 ## Validation
 

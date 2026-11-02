@@ -52,6 +52,9 @@ from the installed package, including editable contributor checkouts.
 Read [the compiled-system contract](docs/BEAT%20Compiled%20System%20Contract.md),
 [worker protocol](docs/BEAT%20Worker%20Protocol.md), and
 [provenance format](docs/BEAT%20Run%20Provenance.md).
+Bounded regions can be air or porous fills (JCA/JCAL equivalent fluids, rigid or
+limp frame) joined to neighbouring air by region seams; see
+[porous materials](docs/Porous%20Materials.md).
 Rapid, subsequent CUDA solves can have memory cleanup policies applied via [bounded worker cleanup reuse](docs/WorkerCleanup.md).
 
 CPU source-request and compiled exterior solves default to
