@@ -208,6 +208,81 @@ def _impedance_outputs(request: dict) -> None:
                 )
 
 
+# Region materials (loss_model). A loss model without "model" is legacy air.
+# Each porous model lists its required SI parameters with their admissible range;
+# each frame lists the extra parameters it needs. Keep in sync with BeatEngineContract.jl.
+_POROUS_PARAMETERS = {
+    "porosity": (0.0, 1.0, False),
+    "flow_resistivity_pa_s_per_m2": (0.0, None, False),
+    "tortuosity": (1.0, None, True),
+    "viscous_characteristic_length_m": (0.0, None, False),
+    "thermal_characteristic_length_m": (0.0, None, False),
+}
+REGION_MATERIAL_MODELS = {"air": (), "jca": tuple(_POROUS_PARAMETERS)}
+REGION_MATERIAL_FRAMES = {"rigid": ()}
+_POROUS_BOUNDARY_KINDS = frozenset({"rigid", "moving", "interface", "unused"})
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def region_material_model(loss_model: dict) -> str:
+    """Return the material model of a validated region loss model."""
+    return loss_model.get("model", "air")
+
+
+def _region_material(region: dict) -> None:
+    path = f"region {region['id']}.loss_model"
+    loss_model = region["loss_model"]
+    if "thermoviscous_wall_losses" in loss_model:
+        _fail(path, "assign thermoviscous wall losses to boundary parameters")
+    model = loss_model.get("model", "air")
+    if not isinstance(model, str) or model not in REGION_MATERIAL_MODELS:
+        _fail(path, f"model {model!r} is not one of {sorted(REGION_MATERIAL_MODELS)}")
+    allowed = {"model"}
+    if model == "air":
+        allowed.add("bulk_loss_factor")
+        factor = loss_model.get("bulk_loss_factor", 0.0)
+        if not _number(factor) or not 0.0 <= factor <= 1.0:
+            _fail(path, "bulk_loss_factor must be a number between 0 and 1")
+    else:
+        if region["kind"] != "bounded_air":
+            _fail(path, f"porous model {model!r} requires a bounded region")
+        frame = loss_model.get("frame")
+        if not isinstance(frame, str) or frame not in REGION_MATERIAL_FRAMES:
+            _fail(path, f"frame {frame!r} is not one of {sorted(REGION_MATERIAL_FRAMES)}")
+        allowed.add("frame")
+        for key in (*REGION_MATERIAL_MODELS[model], *REGION_MATERIAL_FRAMES[frame]):
+            allowed.add(key)
+            low, high, inclusive = _POROUS_PARAMETERS[key]
+            value = loss_model.get(key)
+            if (
+                not _number(value)
+                or (value < low if inclusive else value <= low)
+                or (high is not None and value > high)
+            ):
+                bound = f"{'>=' if inclusive else '>'} {low:g}" + ("" if high is None else f" and <= {high:g}")
+                _fail(path, f"{key} must be a number {bound}")
+    unknown = sorted(set(loss_model) - allowed)
+    if unknown:
+        _fail(path, f"unknown {model} material keys: {', '.join(unknown)}")
+
+
+def _porous_boundary(boundary: dict) -> None:
+    parameters = boundary["parameters"]
+    if (
+        boundary["kind"] not in _POROUS_BOUNDARY_KINDS
+        or parameters.get("thermoviscous_wall_losses", "off") != "off"
+        or "wall_impedance" in parameters
+    ):
+        _fail(
+            f"boundary {boundary['id']}",
+            "porous regions allow only rigid, moving, interface or unused boundaries "
+            "without thermoviscous wall losses or wall impedance",
+        )
+
+
 def _graph(system: dict) -> None:
     _mesh_validator()(system)
     collections = {}
@@ -218,14 +293,15 @@ def _graph(system: dict) -> None:
         collections[key] for key in ("meshes", "regions", "boundaries", "components")
     )
     for region in regions.values():
-        if "thermoviscous_wall_losses" in region["loss_model"]:
-            _fail(f"region {region['id']}.loss_model", "assign thermoviscous wall losses to boundary parameters")
+        _region_material(region)
         _references(region["mesh_ids"], meshes, f"region {region['id']}.mesh_ids")
         for group in region["volume_groups"]:
             if group["mesh_id"] not in region["mesh_ids"] or group["dimension"] != 3:
                 _fail(f"region {region['id']}.volume_groups", "must reference a volume group on a region mesh")
     for boundary in boundaries.values():
         _references([boundary["region_id"]], regions, f"boundary {boundary['id']}.region_id")
+        if region_material_model(regions[boundary["region_id"]]["loss_model"]) != "air":
+            _porous_boundary(boundary)
         if boundary["parameters"].get("thermoviscous_wall_losses", "off") != "off" and (
             regions[boundary["region_id"]]["kind"] != "bounded_air"
             or boundary["kind"] != "rigid"

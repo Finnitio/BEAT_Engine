@@ -183,6 +183,73 @@ function impedance_outputs(request)
     return nothing
 end
 
+# Region materials (loss_model). A loss model without "model" is legacy air.
+# Porous models list required SI parameters (lower bound, upper bound, inclusive lower);
+# frames list their extra parameters. Keep in sync with beat_contract/__init__.py.
+const POROUS_PARAMETERS = Dict(
+    "porosity" => (0.0, 1.0, false),
+    "flow_resistivity_pa_s_per_m2" => (0.0, nothing, false),
+    "tortuosity" => (1.0, nothing, true),
+    "viscous_characteristic_length_m" => (0.0, nothing, false),
+    "thermal_characteristic_length_m" => (0.0, nothing, false),
+)
+const REGION_MATERIAL_MODELS = Dict(
+    "air" => String[],
+    "jca" => ["porosity", "flow_resistivity_pa_s_per_m2", "tortuosity",
+              "viscous_characteristic_length_m", "thermal_characteristic_length_m"],
+)
+const REGION_MATERIAL_FRAMES = Dict("rigid" => String[])
+const POROUS_BOUNDARY_KINDS = ("rigid", "moving", "interface", "unused")
+
+json_number(value) = value isa Real && !(value isa Bool)
+region_material_model(loss_model) = get(loss_model, "model", "air")
+
+function region_material(region)
+    path = "region $(region["id"]).loss_model"
+    loss_model = region["loss_model"]
+    haskey(loss_model, "thermoviscous_wall_losses") &&
+        fail(path, "assign thermoviscous wall losses to boundary parameters")
+    model = get(loss_model, "model", "air")
+    model isa AbstractString && haskey(REGION_MATERIAL_MODELS, model) ||
+        fail(path, "model $(repr(model)) is not one of $(sort(collect(keys(REGION_MATERIAL_MODELS))))")
+    allowed = Set(["model"])
+    if model == "air"
+        push!(allowed, "bulk_loss_factor")
+        factor = get(loss_model, "bulk_loss_factor", 0.0)
+        json_number(factor) && 0 <= factor <= 1 ||
+            fail(path, "bulk_loss_factor must be a number between 0 and 1")
+    else
+        region["kind"] == "bounded_air" || fail(path, "porous model $(repr(model)) requires a bounded region")
+        frame = get(loss_model, "frame", nothing)
+        frame isa AbstractString && haskey(REGION_MATERIAL_FRAMES, frame) ||
+            fail(path, "frame $(repr(frame)) is not one of $(sort(collect(keys(REGION_MATERIAL_FRAMES))))")
+        push!(allowed, "frame")
+        for key in vcat(REGION_MATERIAL_MODELS[model], REGION_MATERIAL_FRAMES[frame])
+            push!(allowed, key)
+            low, high, inclusive = POROUS_PARAMETERS[key]
+            value = get(loss_model, key, nothing)
+            json_number(value) && (inclusive ? value >= low : value > low) &&
+                (high === nothing || value <= high) ||
+                fail(path, "$key must be a number $(inclusive ? ">=" : ">") $low" *
+                     (high === nothing ? "" : " and <= $high"))
+        end
+    end
+    unknown = sort([key for key in keys(loss_model) if !(key in allowed)])
+    isempty(unknown) || fail(path, "unknown $model material keys: $(join(unknown, ", "))")
+    return nothing
+end
+
+function porous_boundary(boundary)
+    parameters = boundary["parameters"]
+    boundary["kind"] in POROUS_BOUNDARY_KINDS &&
+        get(parameters, "thermoviscous_wall_losses", "off") == "off" &&
+        !haskey(parameters, "wall_impedance") ||
+        fail("boundary $(boundary["id"])",
+             "porous regions allow only rigid, moving, interface or unused boundaries " *
+             "without thermoviscous wall losses or wall impedance")
+    return nothing
+end
+
 function graph(system)
     validate_mesh_sources(system)
     collections = Dict()
@@ -192,9 +259,7 @@ function graph(system)
     end
     meshes, regions, boundaries, components = (collections[key] for key in ("meshes", "regions", "boundaries", "components"))
     for region in values(regions)
-        if haskey(region["loss_model"], "thermoviscous_wall_losses")
-            fail("region.loss_model", "assign thermoviscous wall losses to boundary parameters")
-        end
+        region_material(region)
         references(region["mesh_ids"], meshes, "region $(region["id"]).mesh_ids")
         for group in region["volume_groups"]
             group["mesh_id"] in region["mesh_ids"] && group["dimension"] == 3 || fail("volume_groups", "must reference a volume group on a region mesh")
@@ -202,6 +267,7 @@ function graph(system)
     end
     for boundary in values(boundaries)
         references([boundary["region_id"]], regions, "boundary $(boundary["id"]).region_id")
+        region_material_model(regions[boundary["region_id"]]["loss_model"]) == "air" || porous_boundary(boundary)
         if get(boundary["parameters"], "thermoviscous_wall_losses", "off") != "off" && (
             regions[boundary["region_id"]]["kind"] != "bounded_air" ||
             boundary["kind"] != "rigid" || haskey(boundary["parameters"], "wall_impedance") ||
