@@ -136,7 +136,9 @@ regions take the original operator path and give bit-identical results.
 
 Diagnostics of porous requests list `fem_region_materials`: per region its
 normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
-`[real, imag]`. Air-only diagnostics are unchanged.
+`[real, imag]`. Every result, air-only included, also records each bounded region's
+normalized material in `engine_provenance.region_materials`
+([BEAT Run Provenance](BEAT%20Run%20Provenance.md)); air-only numerical outputs are unchanged.
 
 ## Region seams
 

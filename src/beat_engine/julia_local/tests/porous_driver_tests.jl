@@ -214,6 +214,25 @@ end
     end
 end
 
+@testset "provenance records each bounded region's normalized material, air-only included" begin
+    frequencies = (500.0,)
+    region_materials(result) = result["diagnostics"]["engine_provenance"]["region_materials"]
+    air_only, _ = tube_request((Dict{String,Any}(), 8, 0.1), (Dict{String,Any}("bulk_loss_factor" => 0.05), 8, 0.1); frequencies)
+    @test region_materials(only(solve_coupled_workload(air_only).results)) == [
+        Dict("region_id" => "region:tube1", "material" => Dict("model" => "air", "bulk_loss_factor" => 0.0)),
+        Dict("region_id" => "region:tube2", "material" => Dict("model" => "air", "bulk_loss_factor" => 0.05))]
+    mixed, _ = tube_request((Dict{String,Any}("model" => "air"), 8, 0.1), (SOFT_FIBROUS, 8, 0.1); frequencies)
+    @test [entry["material"] for entry in region_materials(only(solve_coupled_workload(mixed).results))] ==
+          [Dict("model" => "air", "bulk_loss_factor" => 0.0), SOFT_FIBROUS]
+    # Coupled FEM-BEM: only the bounded region is listed, not the exterior one.
+    coupled = JSON.parse(JSON.json(coupled_workload_request(; tiny=true)))
+    bounded = only(r for r in coupled["compiled_system"]["regions"] if r["kind"] == "bounded_air")
+    expected = region_material_wire(parse_region_material(get(bounded, "loss_model", Dict{String,Any}()), Float64))
+    for result in solve_coupled_workload(coupled).results
+        @test region_materials(result) == [Dict("region_id" => bounded["id"], "material" => expected)]
+    end
+end
+
 porous_tiny_coupled_request(backend) = begin
     request = JSON.parse(JSON.json(coupled_workload_request(; tiny=true)))
     interior = only(filter(r -> r["kind"] == "bounded_air", request["compiled_system"]["regions"]))

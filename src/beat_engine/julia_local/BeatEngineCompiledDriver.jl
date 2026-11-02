@@ -47,8 +47,20 @@ function record_result_provenance!(result, request)
         "execution" => Dict("backend" => backend, "device" => device, "device_query_error" => device_error,
             "precision" => get(diagnostics, "precision", nothing), "solver_options" => deepcopy(request["solver_options"])),
         "meshes" => deepcopy(RUN_MESH_PROVENANCE[]),
+        "region_materials" => region_materials_provenance(request),
     )
     return result
+end
+
+"""
+Normalized material of every bounded region in request order (`region_material_wire`), for air-only
+requests too: `[{"region_id", "material"}]`, empty without bounded regions.
+"""
+function region_materials_provenance(request)
+    regions = get(get(request, "compiled_system", Dict{String,Any}()), "regions", [])
+    return [Dict{String,Any}("region_id" => String(region["id"]), "material" => region_material_wire(
+                parse_region_material(get(region, "loss_model", Dict{String,Any}()), Float64)))
+            for region in regions if String(get(region, "kind", "")) == "bounded_air"]
 end
 const BEM_FIELD_EVALUATION_CACHES = Dict{String,Any}()
 const BEM_FIELD_EVALUATION_CACHE_ORDER = String[]

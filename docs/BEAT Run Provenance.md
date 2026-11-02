@@ -58,6 +58,14 @@ project snapshot, requested options, and application-side mesh hashes. Inputs mu
 remain unchanged during a solve; these hashes do not turn mutable files into an
 atomic snapshot. General process environment variables are not recorded.
 
+`region_materials` records every bounded region of the request, in request order, as
+`{"region_id", "material"}` with the engine-normalized material (`region_material_wire`):
+air as `{"model": "air", "bulk_loss_factor"}` (also for a legacy or empty `loss_model`),
+porous regions with all their model and frame parameters. It is present for air-only
+requests too and empty when the request has no bounded region. The per-frequency
+`fem_region_materials` diagnostic (porous requests only) additionally carries the
+equivalent density and bulk modulus; see [Porous Materials](Porous%20Materials.md).
+
 ## Artifact propagation
 
 - Frequency JSON metadata retains the full result diagnostics.
