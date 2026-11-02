@@ -154,15 +154,26 @@ the face carries a tag that the region assigns to one of its boundaries:
 | assigned | unassigned | Error naming both regions and the assigned one: assign the face in both regions or in neither. |
 
 Faces of regions on different meshes are never seams. A node on a seam face is shared by
-every region on that mesh that contains it.
+the regions joined through seam faces at that node (a union over region pairs, so a chain of
+seams shares one node); a region that touches the node only across a thin rigid partition
+keeps its own copy, for example where a partition's rim meets a seam between two other
+regions.
+
+**Air-only requests with seams** take the per-region path below, not the original air
+operator: a seam needs per-element bulk loss. Their results equal the same domain meshed as
+one region to rounding (rtol 1e-11 in the tests), not bit for bit. Air-only requests without
+seams keep the v0.7.0 path and are bit-identical.
 
 **Bulk loss at seam nodes.** Interior solves and CPU and CUDA coupled solves of a request
 with seams use the region operator above, so each region's `bulk_loss_factor` acts on its
 own elements (b_r M_r): a seam node gets each side's mass contribution with that side's
 factor, and regions with different factors (air|air or air|porous) are well defined. The
-ROCm and Metal coupled caches still scale mass rows per node; there a seam between regions
-with different bulk loss factors is rejected ("joins different bulk loss factors"), equal
-factors are exact. The aggregate's per-node `bulk_loss_factor_by_vertex` holds the first
+ROCm and Metal coupled caches still scale mass rows per node and keep the air operator; there
+a seam between regions with different bulk loss factors is rejected before the solve
+("Region seam between ... joins different bulk loss factors"), and a seam between regions
+with equal factors (for example air|air with the same `bulk_loss_factor`) is exact, since
+the per-node factor is then single-valued. Porous regions are refused on these backends
+altogether. The aggregate's per-node `bulk_loss_factor_by_vertex` holds the first
 region's factor at seam nodes.
 
 **Output layout.** `fem_nodal_pressure` keeps one row per region-local vertex, regions
@@ -278,7 +289,12 @@ seams the per-region `K_r, M_r` blocks (`coupled_fem_operator_blocks`,
 `coupled_fem_operator_coefficients`); the CPU suite checks that the per-region scatter equals
 the host operator. Because only values change with frequency, `colptr`/`rowval` are identical at every
 frequency, which is what the cuDSS (and MUMPS) symbolic-analysis reuse compares
-(`fem_symbolic_analysis_reused` in the diagnostics).
+(`fem_symbolic_analysis_reused` in the diagnostics). The CPU suite checks only this
+precondition (one pattern across frequencies, `porous_coupled_tests.jl`): the CPU condensed
+solve factors with UMFPACK, which redoes symbolic and numeric factorization at every
+frequency and reports no reuse, and MUMPS ships only in the Metal environment, which refuses
+porous regions. The reuse itself with porous regions is covered only by the CUDA-gated
+check (`BEAT_RUN_POROUS_CUDA=1`, manual).
 
 **Manual CUDA check.** On a machine with a functional CUDA environment, run
 `python scripts/compare_porous_backends.py`. It runs `porous_coupled_tests.jl` in the CUDA
@@ -318,21 +334,32 @@ the mean over the 12 frequencies of the worker's `assembly_s + solve_s + field_s
 operator column is the mean per frequency of `fem_system_s + fem_matrix_cache_s +
 cache_setup_s` (the per-region operator formation and its one-off cache):
 
-| Workload | Material | Runs | Wall, median (range) | Per frequency | vs Air | FEM task / freq | Operator / freq | Peak memory |
-|---|---|---|---|---|---|---|---|---|
-| `Simple_Sealed`, rear 52 mm of the box (12 474 of 55 356 tets) a porous layer joined by a region seam (727 seam nodes); coupled through the driver | Air, one region (original operator) | 3 | 12.28 s (12.23–12.49) | 988 ms | — | 335 ms | 18 ms | 1103 MB |
-| | Air, two regions + seam | 3 | 36.13 s (35.97–36.30) | 971 ms | (reference) | 324 ms | 47 ms | 1061 MB |
-| | JCA | 3 | 36.13 s (35.92–36.17) | 976 ms | +0.5 % | 327 ms | 44 ms | 1053 MB |
-| | JCAL | 3 | 36.03 s (35.93–36.18) | 962 ms | −0.9 % | 332 ms | 42 ms | 1037 MB |
-| | JCA limp | 3 | 36.09 s (36.08–36.38) | 973 ms | +0.2 % | 341 ms | 48 ms | 1045 MB |
-| `Multi_region_SAWMOD`, sealed main chamber (11 020 tets) stuffed | Air | 1 | 306.2 s | 25.42 s | (reference) | 4.64 s | 60 ms | 2100 MB |
-| | JCA | 1 | 305.4 s | 25.34 s | −0.3 % | 4.66 s | 83 ms | 2136 MB |
-| | JCAL | 1 | 305.9 s | 25.39 s | −0.1 % | 4.61 s | 74 ms | 2062 MB |
-| | JCA limp | 1 | 305.1 s | 25.31 s | −0.4 % | 4.53 s | 78 ms | 2137 MB |
-| `compression_driver`, rear chamber (1 780 tets) filled; interior | Air | 3 | 0.22 s (0.21–0.22) | 9.8 ms | (reference) | — | 0.6 ms | 524 MB |
-| | JCA | 3 | 0.22 s (0.22–0.22) | 10.3 ms | +5 % (ranges overlap) | — | 1.1 ms | 526 MB |
-| | JCAL | 3 | 0.22 s (0.21–0.23) | 9.8 ms | −0.3 % | — | 1.1 ms | 522 MB |
-| | JCA limp | 3 | 0.22 s (0.21–0.22) | 9.8 ms | +0.4 % | — | 1.1 ms | 521 MB |
+| Workload | Material | Runs | Wall, median (range) | Per frequency | vs Air | FEM task / freq | Operator / freq | Peak memory | Accuracy |
+|---|---|---|---|---|---|---|---|---|---|
+| `Simple_Sealed`, rear 52 mm of the box (12 474 of 55 356 tets) a porous layer joined by a region seam (727 seam nodes); coupled through the driver | Air, one region (original operator) | 3 | 12.28 s (12.23–12.49) | 988 ms | — | 335 ms | 18 ms | 1103 MB | v0.7.0 air path (A) |
+| | Air, two regions + seam | 3 | 36.13 s (35.97–36.30) | 971 ms | (reference) | 324 ms | 47 ms | 1061 MB | per-region path (B) |
+| | JCA | 3 | 36.13 s (35.92–36.17) | 976 ms | +0.5 % | 327 ms | 44 ms | 1053 MB | (C) |
+| | JCAL | 3 | 36.03 s (35.93–36.18) | 962 ms | −0.9 % | 332 ms | 42 ms | 1037 MB | (C) |
+| | JCA limp | 3 | 36.09 s (36.08–36.38) | 973 ms | +0.2 % | 341 ms | 48 ms | 1045 MB | (C) |
+| `Multi_region_SAWMOD`, sealed main chamber (11 020 tets) stuffed | Air | 1 | 306.2 s | 25.42 s | (reference) | 4.64 s | 60 ms | 2100 MB | bit-identical to v0.7.0 (A) |
+| | JCA | 1 | 305.4 s | 25.34 s | −0.3 % | 4.66 s | 83 ms | 2136 MB | (C) |
+| | JCAL | 1 | 305.9 s | 25.39 s | −0.1 % | 4.61 s | 74 ms | 2062 MB | (C) |
+| | JCA limp | 1 | 305.1 s | 25.31 s | −0.4 % | 4.53 s | 78 ms | 2137 MB | (C) |
+| `compression_driver`, rear chamber (1 780 tets) filled; interior | Air | 3 | 0.22 s (0.21–0.22) | 9.8 ms | (reference) | — | 0.6 ms | 524 MB | bit-identical to v0.7.0 (A) |
+| | JCA | 3 | 0.22 s (0.22–0.22) | 10.3 ms | +5 % (ranges overlap) | — | 1.1 ms | 526 MB | (C) |
+| | JCAL | 3 | 0.22 s (0.21–0.23) | 9.8 ms | −0.3 % | — | 1.1 ms | 522 MB | (C) |
+| | JCA limp | 3 | 0.22 s (0.21–0.22) | 9.8 ms | +0.4 % | — | 1.1 ms | 521 MB | (C) |
+
+**Accuracy.** (A) The SAWMOD and `compression_driver` Air requests are the regression requests
+above, bit-identical to v0.7.0 (SAWMOD Float32 against Float64 CPU: exterior pressure 1.3e-5
+relative, 0.002 dB); the one-region `Simple_Sealed` Air request takes the same unchanged air
+path, whose bit-identity `air_only_pinned_tests.jl` pins, but was not compared on this mesh.
+(B) The two-region air request takes the per-region path, equal to one region to rounding
+(region-seam tests, rtol 1e-11); not compared on this mesh. (C) Porous outputs of these
+projects have no analytical reference; the operator they run is validated by the analytical
+tests under Validation: filled tube input impedance 1.7e-4 (JCA), 1.8e-4 (JCAL), 1.7e-4
+(limp) relative at 80 slabs; radiating filled tube through the FEM–BEM interface 0.25 %
+inlet impedance; air|porous seam against the transfer matrix 1.5e-3.
 
 Per frequency, every porous variant is within run-to-run variance of the same mesh with
 Air, so the 10 % target holds without optimization. Peak memory is within 2 % of the
@@ -344,8 +371,9 @@ arithmetic on these meshes (operator column), against 0.3–4.6 s of FEM condens
 storing `K_r`, `M_r` as full-length value arrays on the shared pattern costs
 2 R nnz values, a few MB here.
 
-The only large difference is outside the frequency loop: the split `Simple_Sealed`
-requests carry the mesh inline (`mesh_data`, 3.7 MB), and the worker spends about 24 s per
+The only large difference is outside the frequency loop, and it explains the 36 s against
+12 s wall time of the `Simple_Sealed` rows while their per-frequency times agree: the split
+`Simple_Sealed` requests carry the mesh inline (`mesh_data`, 3.7 MB), and the worker spends about 24 s per
 request hashing that payload for provenance (`mesh_provenance` in
 `BeatEngineMeshData.jl`: `sha256(JSON.json(mesh["mesh_data"]))`). The same one-region
 request with the mesh inline instead of as a file pays the same 24 s, so it is a cost of
@@ -375,10 +403,13 @@ always solve on CPU, so they need no CUDA run. Windows reports memory as unavail
 `--split-below-m` split writes a new mesh for the layer: on another mesh pick a coordinate
 that leaves only rigid boundaries in the layer (the script stops otherwise).
 
-### CUDA (user measurement, pending)
+### CUDA (manual user step, not measured here)
 
-To be filled in from a Windows CUDA machine with the commands above (`--backend cuda`),
-plus `python scripts/compare_porous_backends.py` for the CUDA accuracy check.
+**Manual step for the user:** this VM has no GPU, so nothing below has been run on CUDA. Fill
+the table in on a Windows CUDA machine with the commands above (`--backend cuda`), and run
+`python scripts/compare_porous_backends.py` for the CUDA accuracy check. Until then CUDA
+support for porous regions and seams is implemented but unmeasured. ROCm is not available to
+the user either, so its air-only path (unchanged from v0.7.0) is not re-measured.
 
 | Workload | Material | Runs | Wall, median (range) | Per frequency | vs Air | Peak memory |
 |---|---|---|---|---|---|---|
@@ -454,9 +485,17 @@ Machine: GPU, CPU, cores, RAM, driver/CUDA version, Julia version, threads.
   one-sided assignment errors with both region ids; a coupled FEM–BEM solve of the tiny
   workload split into two seam-joined regions equals the single-region solve (rtol 1e-9); on
   CPU differing bulk loss across a coupled seam is accepted (monolithic equals condensed,
-  rtol 1e-9); on ROCm and Metal it is rejected, CUDA passes the seam check.
-- `porous_coupled_tests.jl` (backends): the CUDA scatter blocks with their coefficients
-  sum to the host operator (rtol 1e-13, air and air|porous caches) on one pattern at
+  rtol 1e-9); on ROCm and Metal it is rejected, CUDA passes the seam check; three regions on
+  one mesh, two joined by a seam whose rim lies on a thin rigid partition to the third
+  (P1 and P2): the partitioned region keeps its own nodes (zero pressure without a source)
+  and the seamed pair equals the single region (rtol 1e-11).
+- `air_only_pinned_tests.jl`: SHA-256 of every output array of air-only requests (interior
+  P1 in both phasor conventions and P2 tubes, the tiny coupled workload condensed and
+  monolithic, Float64) equals the digest produced by v0.7.0 (`c82bb7a`) on the reference
+  machine. The pinned bits depend on the platform's floating-point libraries.
+- `porous_coupled_tests.jl` (backends): the CUDA per-region scatter blocks with their
+  coefficients sum to the host operator (rtol 1e-13, air|porous cache; air-only caches keep
+  the v0.7.0 blocks) on one pattern at
   200, 700 and 1500 Hz; per-region caches refuse ROCm and Metal by name; an air|porous
   seam in the tiny coupled workload gives monolithic equal to condensed (rtol 1e-9) and
   Float32 with the Float64 FEM reassembly within 1e-4; the backend comparison used by the

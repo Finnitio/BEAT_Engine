@@ -106,8 +106,10 @@ exterior is a **region seam** when neither region assigns a boundary to it: the 
 shares its nodes and treats it as interior. A face assigned in both regions is a thin rigid
 partition (duplicated nodes); a face assigned in only one region is an engine error naming
 both regions. `fem_nodal_pressure` keeps region-contiguous rows of region-local vertices, so
-seam nodes appear in each adjoining region. Seams are detected from the mesh by the engine,
-not by the static validators. See
+seam nodes appear in each adjoining region. Nodes are shared only between regions joined
+through seam faces; a region meeting a seam node across a partition keeps its own copy. On
+ROCm and Metal coupled solves a seam must join equal bulk loss factors. Seams are detected
+from the mesh by the engine, not by the static validators. See
 [Porous Materials](Porous%20Materials.md#region-seams).
 
 ### Exterior ideal-velocity-source motion
