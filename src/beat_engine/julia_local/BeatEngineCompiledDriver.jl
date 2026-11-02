@@ -2794,13 +2794,13 @@ function solve_request_impl(request; event_mode=false)
     bem_backend = Symbol(lowercase(String(get(solver_options, "bem_backend", "cpu"))))
     bem_backend in (:cpu, :cuda, :rocm, :metal) ||
         error("Unsupported coupled BEM backend: $bem_backend. Expected cpu, cuda, rocm, or metal.")
-    # Coupled FEM-BEM operators (monolithic, condensed, GPU) do not form per-region
-    # material operators yet; refuse rather than solve a porous fill as air.
+    # The CPU coupled paths (condensed and monolithic) form per-region material operators;
+    # the accelerator paths do not yet, so refuse rather than solve a porous fill as air.
     porous_region_ids = [String(region["id"]) for region in bounded_regions
                          if is_porous(parse_region_material(region["loss_model"], Float64))]
-    isempty(porous_region_ids) || error(
-        "Porous region materials are currently supported only for interior FEM solves without " *
-        "FEM-BEM interfaces; coupled solves ($(bem_backend) backend) do not support porous regions " *
+    isempty(porous_region_ids) || bem_backend == :cpu || error(
+        "Porous region materials in coupled FEM-BEM solves are currently supported only on the CPU " *
+        "backend; the $(bem_backend) backend does not support porous regions " *
         "$(join(repr.(porous_region_ids), ", ")) yet.")
     symmetry_mode = BeatEngineCore.normalized_symmetry_mode(
         get(solver_options, "symmetry", "off"),
@@ -2828,6 +2828,12 @@ function solve_request_impl(request; event_mode=false)
         moving_boundary_ids=Set(String(id) for component in components for id in component["boundary_ids"]),
     )
     fem_mesh = fem_domains.mesh
+    # Per-region materials only for requests with porous regions: air-only requests keep the
+    # original air operator arithmetic (bit-identical results).
+    coupled_fem_regions = fem_domains.has_porous_regions ? (
+        tetrahedron_ranges=[domain.tetrahedron_range for domain in fem_domains.domains],
+        materials=[domain.material for domain in fem_domains.domains],
+    ) : nothing
     bem_domain = aggregate_bem_region(meshes, unbounded_region, boundaries, FloatType)
     bem_mesh = bem_domain.mesh
     symmetry_tolerance = max(
@@ -3107,6 +3113,7 @@ function solve_request_impl(request; event_mode=false)
                 wall_impedances=fem_domains.wall_impedances,
                 thermoviscous_walls=fem_domains.thermoviscous_walls,
                 bem_backend=bem_backend,
+                fem_regions=coupled_fem_regions,
             )
         else
             prepare_coupled_cache(
@@ -3122,6 +3129,7 @@ function solve_request_impl(request; event_mode=false)
                 bulk_loss_factor_by_vertex=fem_domains.bulk_loss_factor_by_vertex,
                 wall_impedances=fem_domains.wall_impedances,
                 thermoviscous_walls=fem_domains.thermoviscous_walls,
+                fem_regions=coupled_fem_regions,
             )
         end
         cache_setup_s = (time_ns() - cache_setup_started) / 1.0e9
@@ -3201,6 +3209,7 @@ function solve_request_impl(request; event_mode=false)
                         isnothing(get(solver_options, "speaker_rom_rank_experiment", nothing)),
                     bem_operators=sweep_pipeline === nothing ? nothing :
                                   () -> take_sweep_assembly!(sweep_pipeline, frequency_index - sweep_pipeline_start + 1),
+                    fem_regions=coupled_fem_regions,
                 )
             else
                 build_coupled_system(
@@ -3227,6 +3236,7 @@ function solve_request_impl(request; event_mode=false)
                     transducers=transducers,
                     transducer_operators=transducer_operators,
                     prescribed_bem_normal_velocity=prescribed_bem_normal_velocity,
+                    fem_regions=coupled_fem_regions,
                 )
             end
             assembly_s = (time_ns() - assembly_started) / 1.0e9
@@ -3716,6 +3726,9 @@ function solve_request_impl(request; event_mode=false)
                     for region in bounded_regions
                 ),
                 "wall_impedance_boundary_ids" => [spec.boundary_id for spec in fem_domains.wall_impedances],
+                (isnothing(coupled_fem_regions) ? () : ("fem_region_materials" => region_material_diagnostics(
+                    [domain.id for domain in fem_domains.domains], coupled_fem_regions.materials,
+                    Float64(frequency_hz), Float64(density), Float64(sound_speed)),))...,
                 thermoviscous_diagnostics(
                     (use_condensed_solver ? coupled_system.cache.base : coupled_system.cache).thermoviscous_operator,
                     fem_domains.thermoviscous_walls, frequency_hz, sound_speed, density)...,

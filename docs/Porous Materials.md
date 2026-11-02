@@ -76,6 +76,17 @@ existing terms, and this is exactly the "ρ_eq instead of ρ0" velocity relation
 the physical equivalent fluid. Pressure and volume flux (1/ρ_eq) ∂p/∂n are
 continuous across nodes shared by two regions through the weak form alone.
 
+The same holds at an FEM–BEM interface. The coupled solve's interface unknown is
+the FEM-side flux ρ0 (1/ρ_eq) ∂p/∂n, which equals the exterior air's ∂p/∂n when the
+normal velocity is continuous, so the interface flux blocks, BEM coupling and
+`interface_average_normal_velocity` (flux / `neumann_scale(ρ0, ω)`) are unchanged:
+the porous region enters the coupling only through ρ_eq in its volume operator. The
+CPU coupled caches (`prepare_coupled_cache`, used by the monolithic and condensed
+builders) hold the per-region operator when the request has porous regions, and
+`coupled_fem_dynamic_stiffness` forms it per frequency. The Float64 FEM reassembly
+for Float32 runs (`BLAB_COUPLED_FEM_FLOAT64`) reassembles each region's `K_r`/`M_r`
+in Float64 on the same pattern. Coupled FEM mass is always consistent.
+
 `K_r`, `M_r` are assembled once per request over each region's tetrahedra (P1 or
 P2, with the requested consistent/lumped mass blending) and stored as value arrays
 on the pattern of the global air operator. Each frequency only rewrites `nzval`, so
@@ -88,9 +99,11 @@ normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
 
 ## Current scope
 
-- Interior FEM solves (no FEM–BEM interfaces), CPU.
-- Coupled FEM–BEM solves refuse porous regions on every backend (CPU, CUDA, ROCm,
-  Metal) before mesh or device setup, rather than solving the fill as air.
+- Interior FEM solves, CPU.
+- Coupled FEM–BEM solves on the CPU backend (condensed and monolithic, Float64 and
+  Float32), including porous regions that reach an interface to the exterior.
+- Coupled solves on CUDA, ROCm and Metal refuse porous regions before mesh or device
+  setup, rather than solving the fill as air.
 - Regions on one mesh do not yet share seam vertices; each region is closed by its
   own boundaries.
 
@@ -116,4 +129,23 @@ normalized material and, for porous regions, ρ_eq and K_eq at that frequency as
   99 mm at 2 kHz) plus a convergence ratio above 3 per halving (measured 4.0).
   Further tests: an air tube anchors the piston sign, air and porous regions in one
   request match their separate solves, the porous operator keeps the air pattern,
-  legacy and explicit air are bit-identical, and coupled solves refuse porous regions.
+  legacy and explicit air are bit-identical, and accelerator coupled backends refuse
+  porous regions.
+- `porous_coupled_tests.jl`: a 20 mm square tube, 50 mm long, completely filled with
+  the same material, piston at z = 0 and its open end an FEM–BEM interface radiating
+  into the exterior (the BEM surface is the tube's outside). The reference is
+  independent of the porous coupling: the analytical JCA transfer matrix of the
+  filled tube, loaded by the radiation impedance p/v of the same opening taken from
+  an air-only coupled solve of the same mesh. At 200, 700 and 1500 Hz (CPU, condensed,
+  Float64, 40 slabs) the measured relative errors are at most 0.25 % for the inlet
+  impedance (tolerance 0.5 %), 0.86 % for the opening velocity (tolerance 1.5 %) and
+  1.1 % for the exterior pressure ratio against the opening velocity ratio (tolerance
+  2 %). Doubling the slabs leaves them unchanged: they come from the plane-wave model
+  of the opening (the near field differs between air and porous fill), not from the
+  discretization. An ideal open end (zero load) would move the opening velocity by
+  10–15 times that error, so the test resolves the radiation load. Further tests:
+  monolithic equals condensed (rtol 1e-9), Float32 with and without the Float64 FEM
+  reassembly agrees (rtol 1e-4 / 1e-3), the negative-time result is the conjugate,
+  and air-only coupled requests with legacy and explicit air are bit-identical.
+  Air-only coupled results were also checked bit-identical against the previous
+  engine (tiny workload: Float32/Float64, condensed/monolithic, Float64 FEM).

@@ -34,6 +34,7 @@ export VolumeMesh,
     assemble_fem_matrices,
     blend_fem_mass_matrix,
     assemble_fem_dynamic_stiffness,
+    coupled_fem_dynamic_stiffness,
     assemble_boundary_mass_matrix,
     assemble_boundary_tangential_stiffness,
     prepare_thermoviscous_operator,
@@ -1126,6 +1127,25 @@ function assemble_transducer_operators(
     )
 end
 
+"""
+    coupled_fem_dynamic_stiffness(prepared, omega, sound_speed, density)
+
+The coupled cache's FEM volume operator at `omega`: the air operator `K - k^2 M` (with per-vertex
+bulk loss) for air-only caches, or `sum_r a_r K_r + b_r M_r` on the same pattern when the cache
+holds per-region materials. Both are the rho0-normalized Helmholtz form, so the interface flux,
+moving-boundary and transducer blocks keep `neumann_scale(rho0, omega)` (docs/Porous Materials.md).
+"""
+function coupled_fem_dynamic_stiffness(prepared, omega, sound_speed, density)
+    isnothing(prepared.region_operator) || return assemble_region_fem_operator(
+        prepared.region_operator, omega, density, sound_speed)
+    return assemble_fem_dynamic_stiffness(
+        prepared.stiffness,
+        prepared.mass,
+        omega / sound_speed;
+        bulk_loss_mass=prepared.bulk_loss_mass,
+    )
+end
+
 # Diagnostics retain the individual operators needed for replay/residual checks.
 function resolve_coupled_bem_assembly(mode::Symbol, backend::Symbol, diagnostics::Bool)
     mode in (:auto, :combined, :operators) || error(
@@ -1147,12 +1167,17 @@ function prepare_coupled_cache(
     bulk_loss_factor_by_vertex=zeros(T, length(fem_mesh.vertices)),
     wall_impedances=NamedTuple[],
     thermoviscous_walls=NamedTuple[],
+    fem_regions=nothing,
 ) where {T<:AbstractFloat}
     is_quadratic(fem_mesh) && error(
         "Quadratic tetrahedra are currently supported only by the pure interior FEM solve.",
     )
     bem_backend in (:cpu, :cuda, :rocm, :metal) ||
         error("Unsupported coupled BEM backend: $bem_backend. Expected :cpu, :cuda, :rocm, or :metal.")
+    isnothing(fem_regions) || bem_backend == :cpu || error(
+        "Per-region FEM material operators in coupled solves are currently supported only on the " *
+        "CPU backend; got $bem_backend.",
+    )
     resolve_coupled_bem_assembly(coupled_bem_assembly, bem_backend, false)
     normalized_symmetry = BeatEngineCore.normalized_symmetry_mode(symmetry_mode)
     validate_symmetry_fundamental_domain!(bem_mesh, normalized_symmetry)
@@ -1166,6 +1191,10 @@ function prepare_coupled_cache(
         "Per-region FEM bulk-loss factors must be finite and between 0 and 1.",
     )
     bulk_loss_mass = spdiagm(0 => T.(bulk_loss_factor_by_vertex)) * mass
+    # Requests with porous regions form sum_r a_r K_r + b_r M_r on the air pattern (coupled FEM
+    # mass is consistent); air-only requests keep `fem_regions === nothing` and the air operator.
+    region_operator = isnothing(fem_regions) ? nothing : prepare_region_fem_operator(
+        fem_mesh, fem_regions.tetrahedron_ranges, fem_regions.materials, stiffness, mass)
     wall_impedance_operators = [
         begin
             face_indices = findall(==(Int(spec.tag)), fem_mesh.boundary_physical_tags)
@@ -1383,6 +1412,8 @@ function prepare_coupled_cache(
         mass=mass,
         bulk_loss_mass=bulk_loss_mass,
         bulk_loss_factor_by_vertex=T.(collect(bulk_loss_factor_by_vertex)),
+        fem_regions=fem_regions,
+        region_operator=region_operator,
         wall_impedance_operators=wall_impedance_operators,
         thermoviscous_operator=thermoviscous_operator,
         interface_operators=interface_operators,
@@ -2140,6 +2171,7 @@ function build_coupled_system(
     coupled_bem_assembly::Symbol=:auto,
     coupled_bem_image_fusion::Bool=true,
     coupled_bem_max_registers::Int=0,
+    fem_regions=nothing,
 ) where {T<:AbstractFloat}
     assembly_mode = resolve_coupled_bem_assembly(coupled_bem_assembly, bem_backend, validation_diagnostics)
     (coupled_bem_max_registers == 0 || 32 <= coupled_bem_max_registers <= 255) ||
@@ -2182,6 +2214,7 @@ function build_coupled_system(
         ),
         wall_impedances=wall_impedances,
         thermoviscous_walls=thermoviscous_walls,
+        fem_regions=fem_regions,
     ) : cache
     prepared.bem_backend == bem_backend ||
         error("Coupled cache backend does not match requested BEM backend.")
@@ -2191,12 +2224,7 @@ function build_coupled_system(
         error("Coupled cache retained FEM vertices do not match the current moving surfaces.")
     omega = T(2pi) * frequency_hz
     wavenumber = omega / sound_speed
-    fem_system = assemble_fem_dynamic_stiffness(
-        prepared.stiffness,
-        prepared.mass,
-        wavenumber;
-        bulk_loss_mass=prepared.bulk_loss_mass,
-    )
+    fem_system = coupled_fem_dynamic_stiffness(prepared, omega, sound_speed, density)
     fem_system = add_thermoviscous_terms(
         fem_system, prepared.thermoviscous_operator, frequency_hz, sound_speed, density)
     wall_admittances = Complex{T}[
