@@ -68,3 +68,11 @@ end
         @test ready || !isempty(result["metal"]["reason"])
     end
 end
+
+@testset "ROCm and Metal withhold porous region materials; CPU and CUDA use the worker list" begin
+    result = AvailabilityProbe.worker_backend_availability()
+    @test result["rocm"]["fem_region_material_models"] == ["air"]
+    @test result["metal"]["fem_region_material_models"] == ["air"]
+    @test !haskey(result["cpu"], "fem_region_material_models")
+    @test !haskey(result["cuda"], "fem_region_material_models")
+end

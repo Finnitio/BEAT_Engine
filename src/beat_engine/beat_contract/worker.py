@@ -87,6 +87,12 @@ def validate_worker_ready(info: dict) -> None:
     for name, backend in backends.items():
         _require(isinstance(backend, dict) and type(backend.get("available")) is bool, f"invalid {name} availability.")
         _require(isinstance(backend.get("reason", ""), str), f"invalid {name} availability reason.")
+        if "fem_region_material_models" in backend:
+            models = backend["fem_region_material_models"]
+            _require(
+                isinstance(models, list) and all(isinstance(model, str) and bool(model.strip()) for model in models),
+                f"invalid {name} fem_region_material_models capabilities; expected a list of non-empty strings.",
+            )
 
 
 def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
@@ -220,6 +226,17 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
         convention in backend.get("phasor_conventions", info.get("phasor_conventions", ["exp(-i omega t)"])),
         f"phasor convention {convention!r} is not qualified for backend {backend_name!r}.",
     )
+    if operation == "solve":
+        # A backend may qualify fewer region materials than the worker parses (porous regions
+        # solve on CPU and CUDA, not yet on ROCm or Metal); it falls back to the worker list.
+        qualified = backend.get("fem_region_material_models", info.get("fem_region_material_models", ["air"]))
+        for region in request["compiled_system"]["regions"]:
+            model = region["loss_model"].get("model", "air")
+            _require(
+                model == "air" or model in qualified,
+                f"region material model {model!r} (region {region['id']!r}) is not qualified for backend "
+                f"{backend_name!r}; solve porous regions on the cpu or cuda backend.",
+            )
     return command
 
 

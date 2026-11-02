@@ -482,3 +482,41 @@ def test_jcal_and_limp_need_their_own_capability_values(ready, payload, changes)
     ready["fem_region_material_frames"] = ["rigid"]
     with pytest.raises(WorkerCompatibilityError, match="region material"):
         negotiate_submission(ready, payload, "solve")
+
+
+def enable_coupled_porous_region(payload, backend):
+    system = payload["compiled_system"]
+    interior = copy.deepcopy(system["regions"][0])
+    interior.update(id="region:fill", kind="bounded_air", loss_model=copy.deepcopy(JCA_RIGID))
+    system["regions"].append(interior)
+    payload["solver_options"]["bem_backend"] = backend
+    return interior
+
+
+@pytest.mark.parametrize("backend", ["rocm", "metal"])
+def test_backend_can_withhold_porous_region_materials(ready, payload, backend):
+    ready["backends"][backend] = {"available": True, "fem_region_material_models": ["air"]}
+    interior = enable_coupled_porous_region(payload, backend)
+    with pytest.raises(WorkerCompatibilityError, match=f"not qualified for backend {backend!r}"):
+        negotiate_submission(ready, payload, "solve")
+    interior["loss_model"] = {"model": "air", "bulk_loss_factor": 0.1}
+    negotiate_submission(ready, payload, "solve")
+
+
+def test_backend_without_material_list_falls_back_to_worker_list(ready, payload):
+    ready["backends"]["cuda"] = {"available": True}
+    enable_coupled_porous_region(payload, "cuda")
+    negotiate_submission(ready, payload, "solve")
+
+
+def test_interior_porous_solve_checks_the_cpu_backend_only(ready, payload):
+    ready["backends"]["metal"] = {"available": True, "fem_region_material_models": ["air"]}
+    enable_porous_region(payload)
+    payload["solver_options"]["bem_backend"] = "metal"
+    negotiate_submission(ready, payload, "solve")
+
+
+def test_invalid_per_backend_material_list_is_rejected(ready, payload):
+    ready["backends"]["cpu"]["fem_region_material_models"] = "jca"
+    with pytest.raises(WorkerCompatibilityError, match="invalid cpu fem_region_material_models"):
+        negotiate_submission(ready, payload, "solve")

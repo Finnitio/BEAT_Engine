@@ -30,7 +30,7 @@ then emits the resulting object as a single JSON line on stdout, with `type: rea
 | `precisions` | `float32` and `float64` |
 | `solve_kinds` | `exterior_bem`, `interior_fem`, `coupled_fem_bem_lem` |
 | `exterior_source_profiles` | List of non-empty strings naming supported ideal-velocity-source motion profiles; absent on older workers |
-| `backends` | Per-backend `available` boolean and optional explanatory `reason` |
+| `backends` | Per-backend `available` boolean and optional explanatory `reason`; optional `phasor_conventions` and `fem_region_material_models` narrow the worker-level lists for that backend (ROCm and Metal announce `["air"]`: no porous regions) |
 | `cancellation` | `marker_file`, for physical solves |
 | `field_cache` | Process lifetime, clearing conditions, and maximum entry count |
 | `runtime` | Julia runtime version |
