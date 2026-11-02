@@ -1856,6 +1856,7 @@ include(joinpath(@__DIR__, "porous_material_tests.jl"))
 include(joinpath(@__DIR__, "porous_driver_tests.jl"))
 include(joinpath(@__DIR__, "region_seam_tests.jl"))
 include(joinpath(@__DIR__, "porous_coupled_tests.jl"))
+include(joinpath(@__DIR__, "air_only_pinned_tests.jl"))
 get(ENV, "BEAT_RUN_POROUS_CONVERGENCE", "0") == "1" && include(joinpath(@__DIR__, "porous_convergence_tests.jl"))
 # Required standalone thin-air qualification: exterior_coupled_agreement_tests.jl.
 # Its runtime exceeds the default-suite budget; see docs/ExteriorCoupledQualification.md.
