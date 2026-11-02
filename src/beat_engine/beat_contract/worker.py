@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import SYSTEM_RESULT_VERSION, SYSTEM_SOLVE_REQUEST_VERSION, validate_solve_request
+from . import SYSTEM_RESULT_VERSION, SYSTEM_SOLVE_REQUEST_VERSION, region_material_model, validate_solve_request
 
 WORKER_PROTOCOL_VERSION = 1
 FIELD_ARRAY_VERSION = 1
@@ -142,7 +142,7 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
                 )
         for region in request["compiled_system"]["regions"]:
             loss_model = region["loss_model"]
-            model = loss_model.get("model", "air")
+            model = region_material_model(loss_model)
             if model == "air":
                 continue
             _require(
@@ -230,7 +230,7 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
         # A backend may qualify fewer region materials than the worker parses (the worker
         # announces which, per backend); it falls back to the worker list.
         for region in request["compiled_system"]["regions"]:
-            model = region["loss_model"].get("model", "air")
+            model = region_material_model(region["loss_model"])
             if model == "air" or model in _backend_region_material_models(info, backend):
                 continue
             qualifying = [

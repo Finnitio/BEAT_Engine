@@ -250,7 +250,7 @@ def _region_material(region: dict) -> None:
     loss_model = region["loss_model"]
     if "thermoviscous_wall_losses" in loss_model:
         _fail(path, "assign thermoviscous wall losses to boundary parameters")
-    model = loss_model.get("model", "air")
+    model = region_material_model(loss_model)
     if not isinstance(model, str) or model not in REGION_MATERIAL_MODELS:
         _fail(path, f"model {model!r} is not one of {sorted(REGION_MATERIAL_MODELS)}")
     allowed = {"model"}

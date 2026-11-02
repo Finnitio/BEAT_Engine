@@ -407,12 +407,8 @@ function _fem_system_float64(store, fem_mesh::VolumeMesh, prepared, frequency_hz
         end
     end
     omega = 2pi * Float64(frequency_hz)
-    system = isnothing(matrices.region_operator) ? assemble_fem_dynamic_stiffness(
-        matrices.stiffness,
-        matrices.mass,
-        omega / Float64(sound_speed);
-        bulk_loss_mass=matrices.bulk_loss_mass,
-    ) : assemble_region_fem_operator(matrices.region_operator, omega, Float64(density), Float64(sound_speed))
+    # `matrices` carries the cache's operator fields in Float64: the same air or per-region form.
+    system = coupled_fem_dynamic_stiffness(matrices, omega, Float64(sound_speed), Float64(density))
     system = add_thermoviscous_terms(system, matrices.thermoviscous,
         Float64(frequency_hz), Float64(sound_speed), Float64(density))
     for (operator, matrix) in zip(prepared.wall_impedance_operators, matrices.walls)
