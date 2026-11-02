@@ -1157,34 +1157,26 @@ qualified for porous regions yet.
 const PER_REGION_COUPLED_BACKENDS = (:cpu, :cuda)
 
 """
-    coupled_fem_operator_blocks(prepared)
+    coupled_fem_operator_blocks(operator::RegionFemOperator)
 
-Frequency-invariant sparse blocks of the coupled FEM volume operator, in the order of
-`coupled_fem_operator_coefficients`: `K, M, D_eta M` for the air operator, or `K_r, M_r` per
-region (all on the shared air pattern) when `prepared.region_operator` is set. The device
-monolithic path caches one scatter block each; `sum_i c_i B_i` is `coupled_fem_dynamic_stiffness`.
+Frequency-invariant sparse blocks `K_r, M_r` per region (all on the shared air pattern), in the
+order of `coupled_fem_operator_coefficients`. The device monolithic path caches one scatter block
+each when the coupled cache holds per-region materials; `sum_i c_i B_i` is
+`assemble_region_fem_operator`. Air-only caches keep the separate `K`, `M`, `D_eta M` blocks.
 """
-function coupled_fem_operator_blocks(prepared)
-    operator = prepared.region_operator
-    isnothing(operator) && return [prepared.stiffness, prepared.mass, prepared.bulk_loss_mass]
+function coupled_fem_operator_blocks(operator::RegionFemOperator)
     block(values) = SparseMatrixCSC(operator.order, operator.order, copy(operator.colptr), copy(operator.rowval), copy(values))
     return [block(values) for (stiffness, mass) in zip(operator.stiffness_values, operator.mass_values)
             for values in (stiffness, mass)]
 end
 
 """
-    coupled_fem_operator_coefficients(prepared, omega, sound_speed, density)
+    coupled_fem_operator_coefficients(operator::RegionFemOperator, omega, sound_speed, density)
 
-Complex coefficients of `coupled_fem_operator_blocks` at `omega`: `1, -k^2, -i sign k^2` for
-air, or the per-region `a_r, b_r` of `region_operator_coefficients` (docs/Porous Materials.md).
+Complex coefficients of `coupled_fem_operator_blocks` at `omega`: the per-region `a_r, b_r` of
+`region_operator_coefficients` (docs/Porous Materials.md).
 """
-function coupled_fem_operator_coefficients(prepared, omega, sound_speed, density)
-    T = real(eltype(prepared.mass))
-    operator = prepared.region_operator
-    if isnothing(operator)
-        wavenumber = T(omega) / T(sound_speed)
-        return Complex{T}[one(T), -(wavenumber^2), Complex{T}(0, -propagation_sign() * wavenumber^2)]
-    end
+function coupled_fem_operator_coefficients(operator::RegionFemOperator{T}, omega, sound_speed, density) where {T}
     coefficients = Complex{T}[]
     for material in operator.materials
         region = region_operator_coefficients(material, T(omega), density, sound_speed)
@@ -1405,11 +1397,16 @@ function prepare_coupled_cache(
                              build_cuda_sparse_scatter_cache :
                              build_rocm_sparse_scatter_cache
         gamma = Int.(collect(retained_fem_vertices))
-        # The FEM volume operator as frequency-invariant blocks (air: K, M, D_eta M; per region:
-        # K_r, M_r), scattered with per-frequency coefficients by `build_coupled_system`.
+        # The FEM volume operator as frequency-invariant blocks, scattered with per-frequency
+        # coefficients by `build_coupled_system`: the air K, M, D_eta M blocks for air-only caches
+        # (unchanged), the per-region K_r, M_r blocks when the cache holds per-region materials.
+        fem_operator_blocks = isnothing(region_operator) ? (
+            stiffness=build_sparse_cache(stiffness),
+            mass=build_sparse_cache(mass),
+            bulk_loss_mass=build_sparse_cache(bulk_loss_mass),
+        ) : (fem_operator=[build_sparse_cache(block) for block in coupled_fem_operator_blocks(region_operator)],)
         device_sparse_blocks = (
-            fem_operator=[build_sparse_cache(block) for block in coupled_fem_operator_blocks((
-                stiffness=stiffness, mass=mass, bulk_loss_mass=bulk_loss_mass, region_operator=region_operator))],
+            fem_operator_blocks...,
             wall_impedance=[
                 build_sparse_cache(operator.matrix)
                 for operator in wall_impedance_operators
@@ -2510,12 +2507,31 @@ function build_coupled_system(
                     row_offset=first(flux_range) - 1,
                 )
             else
-                # Same terms as the host `coupled_fem_dynamic_stiffness`: air or per region.
-                for (index, (block, coefficient)) in enumerate(zip(
-                    prepared.device_sparse_blocks.fem_operator,
-                    coupled_fem_operator_coefficients(prepared, omega, sound_speed, density),
-                ))
-                    scatter_sparse!(d_coupled, block; alpha=coefficient, add=index > 1)
+                if isnothing(prepared.region_operator)
+                    scatter_sparse!(
+                        d_coupled,
+                        prepared.device_sparse_blocks.stiffness,
+                    )
+                    scatter_sparse!(
+                        d_coupled,
+                        prepared.device_sparse_blocks.mass;
+                        alpha=Complex{T}(-(wavenumber^2), 0),
+                        add=true,
+                    )
+                    scatter_sparse!(
+                        d_coupled,
+                        prepared.device_sparse_blocks.bulk_loss_mass;
+                        alpha=Complex{T}(0, -propagation_sign() * (wavenumber^2)),
+                        add=true,
+                    )
+                else
+                    # Same terms as the host `coupled_fem_dynamic_stiffness` per region.
+                    for (index, (block, coefficient)) in enumerate(zip(
+                        prepared.device_sparse_blocks.fem_operator,
+                        coupled_fem_operator_coefficients(prepared.region_operator, omega, sound_speed, density),
+                    ))
+                        scatter_sparse!(d_coupled, block; alpha=coefficient, add=index > 1)
+                    end
                 end
                 if !isnothing(prepared.thermoviscous_operator)
                     tv = thermoviscous_coefficients(frequency_hz, sound_speed, density)

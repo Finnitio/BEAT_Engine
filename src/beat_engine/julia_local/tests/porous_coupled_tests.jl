@@ -266,31 +266,32 @@ function radiating_tube_cache(; porous, bem_backend=:cpu, slabs=12)
 end
 
 @testset "FEM operator terms (device scatter blocks) sum to the host operator on one pattern" begin
-    for porous in (false, true)
-        cache = radiating_tube_cache(; porous)
-        blocks = coupled_fem_operator_blocks(cache)
-        @test length(blocks) == (porous ? 4 : 3)
-        patterns = Set{Tuple{Vector{Int},Vector{Int}}}()
-        for frequency in (200.0, 700.0, 1500.0)
-            omega = 2pi * frequency
-            host = coupled_fem_dynamic_stiffness(cache, omega, C0, RHO0)
-            coefficients = coupled_fem_operator_coefficients(cache, omega, C0, RHO0)
-            @test length(coefficients) == length(blocks)
-            # The device path scatters each block with its coefficient into the dense system.
-            scattered = zeros(ComplexF64, size(host))
-            for (block, coefficient) in zip(blocks, coefficients)
-                rows, columns, values = findnz(block)
-                for (row, column, value) in zip(rows, columns, values)
-                    scattered[row, column] += coefficient * value
-                end
+    # Air-only caches keep no region operator: the device path scatters the original K, M,
+    # D_eta M blocks for them.
+    @test isnothing(radiating_tube_cache(; porous=false).region_operator)
+    cache = radiating_tube_cache(; porous=true)
+    blocks = coupled_fem_operator_blocks(cache.region_operator)
+    @test length(blocks) == 4
+    patterns = Set{Tuple{Vector{Int},Vector{Int}}}()
+    for frequency in (200.0, 700.0, 1500.0)
+        omega = 2pi * frequency
+        host = coupled_fem_dynamic_stiffness(cache, omega, C0, RHO0)
+        coefficients = coupled_fem_operator_coefficients(cache.region_operator, omega, C0, RHO0)
+        @test length(coefficients) == length(blocks)
+        # The device path scatters each block with its coefficient into the dense system.
+        scattered = zeros(ComplexF64, size(host))
+        for (block, coefficient) in zip(blocks, coefficients)
+            rows, columns, values = findnz(block)
+            for (row, column, value) in zip(rows, columns, values)
+                scattered[row, column] += coefficient * value
             end
-            @test scattered ≈ Matrix(host) rtol=1e-13
-            # The cuDSS and MUMPS symbolic analyses are reused when the pattern is unchanged.
-            push!(patterns, (copy(host.colptr), copy(host.rowval)))
         end
-        @test length(patterns) == 1
-        porous && @test all(block -> (block.colptr, block.rowval) == only(patterns), blocks)
+        @test scattered ≈ Matrix(host) rtol=1e-13
+        # The cuDSS and MUMPS symbolic analyses are reused when the pattern is unchanged.
+        push!(patterns, (copy(host.colptr), copy(host.rowval)))
     end
+    @test length(patterns) == 1
+    @test all(block -> (block.colptr, block.rowval) == only(patterns), blocks)
 end
 
 @testset "per-region coupled caches: CPU and CUDA only, ROCm and Metal refuse by name" begin

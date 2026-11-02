@@ -269,10 +269,12 @@ per wavelength misses it.
 **Backends.** Every path forms the same operator on the air pattern. The host builds
 `sum_r a_r K_r + b_r M_r` (`coupled_fem_dynamic_stiffness`), which the CPU monolithic and
 condensed solves, the Float64 FEM reassembly and the CUDA cuDSS condensation consume. The
-CUDA monolithic path scatters frequency-invariant device blocks (`coupled_fem_operator_blocks`:
-`K, M, D_eta M` for air, `K_r, M_r` per region) with per-frequency coefficients
-(`coupled_fem_operator_coefficients`); the CPU suite checks that this scatter equals the host
-operator. Because only values change with frequency, `colptr`/`rowval` are identical at every
+CUDA monolithic path scatters frequency-invariant device blocks with per-frequency
+coefficients: for air-only requests without seams the original `K, M, D_eta M` blocks (code path
+unchanged from v0.7.0, shared with ROCm), and only for requests with porous regions or region
+seams the per-region `K_r, M_r` blocks (`coupled_fem_operator_blocks`,
+`coupled_fem_operator_coefficients`); the CPU suite checks that the per-region scatter equals
+the host operator. Because only values change with frequency, `colptr`/`rowval` are identical at every
 frequency, which is what the cuDSS (and MUMPS) symbolic-analysis reuse compares
 (`fem_symbolic_analysis_reused` in the diagnostics).
 
