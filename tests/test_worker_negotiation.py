@@ -414,3 +414,54 @@ def test_invalid_exterior_kind_advertisement(ready, kinds):
 def test_missing_exterior_kinds_keeps_ideal_sources_compatible(ready, payload):
     ready.pop("exterior_component_kinds")
     assert negotiate_submission(ready, payload, "solve")["result_schema_version"] == 2
+
+
+JCA_RIGID = {
+    "model": "jca",
+    "frame": "rigid",
+    "porosity": 0.98,
+    "flow_resistivity_pa_s_per_m2": 25000.0,
+    "tortuosity": 1.02,
+    "viscous_characteristic_length_m": 9.0e-5,
+    "thermal_characteristic_length_m": 1.8e-4,
+}
+MATERIAL_CAPABILITIES = {"fem_region_material_models": "jca", "fem_region_material_frames": "rigid"}
+
+
+def enable_porous_region(payload):
+    region = payload["compiled_system"]["regions"][0]
+    region["kind"] = "bounded_air"
+    region["loss_model"] = copy.deepcopy(JCA_RIGID)
+    return region
+
+
+@pytest.mark.parametrize("capability", sorted(MATERIAL_CAPABILITIES))
+@pytest.mark.parametrize("advertised", [None, [], ["air"], ["future_value"]])
+def test_porous_material_requires_explicit_capability(ready, payload, capability, advertised):
+    region = enable_porous_region(payload)
+    if advertised is None:
+        ready.pop(capability)
+    else:
+        ready[capability] = advertised
+    with pytest.raises(WorkerCompatibilityError, match="region material"):
+        negotiate_submission(ready, payload, "solve")
+    region["loss_model"] = {"model": "air", "bulk_loss_factor": 0.1}
+    negotiate_submission(ready, payload, "solve")
+
+
+def test_air_materials_need_no_material_capability(ready, payload):
+    for capability in MATERIAL_CAPABILITIES:
+        ready.pop(capability)
+    region = enable_porous_region(payload)
+    for loss_model in ({}, {"bulk_loss_factor": 0.1}, {"model": "air"}):
+        region["loss_model"] = loss_model
+        negotiate_submission(ready, payload, "solve")
+
+
+@pytest.mark.parametrize("capability", sorted(MATERIAL_CAPABILITIES))
+def test_porous_capability_accepts_advertised_values_and_rejects_invalid_handshake(ready, payload, capability):
+    enable_porous_region(payload)
+    negotiate_submission(ready, payload, "solve")
+    ready[capability] = MATERIAL_CAPABILITIES[capability]
+    with pytest.raises(WorkerCompatibilityError, match=f"invalid {capability}"):
+        negotiate_submission(ready, payload, "solve")

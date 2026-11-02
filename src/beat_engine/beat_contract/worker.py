@@ -63,7 +63,12 @@ def validate_worker_ready(info: dict) -> None:
             and all(isinstance(profile, str) and bool(profile.strip()) for profile in profiles),
             "invalid exterior_source_profiles capabilities; expected a list of non-empty strings.",
         )
-    for name in ("fem_wall_loss_models", "fem_wall_loss_scopes"):
+    for name in (
+        "fem_wall_loss_models",
+        "fem_wall_loss_scopes",
+        "fem_region_material_models",
+        "fem_region_material_frames",
+    ):
         if name in info:
             values = info[name]
             _require(
@@ -129,6 +134,19 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
                     model in info.get("fem_wall_loss_models", []),
                     f"thermoviscous wall loss model {model!r} is unavailable; update BEAT Engine.",
                 )
+        for region in request["compiled_system"]["regions"]:
+            loss_model = region["loss_model"]
+            model = loss_model.get("model", "air")
+            if model == "air":
+                continue
+            _require(
+                model in info.get("fem_region_material_models", []),
+                f"region material model {model!r} is unavailable; update BEAT Engine.",
+            )
+            _require(
+                loss_model["frame"] in info.get("fem_region_material_frames", []),
+                f"region material frame {loss_model['frame']!r} is unavailable; update BEAT Engine.",
+            )
         options = request["solver_options"]
         kinds = {region["kind"] for region in request["compiled_system"]["regions"]}
         kind = (
