@@ -59,6 +59,16 @@ end
 
 const METAL_MODULE = include("BeatEngineMetalLoad.jl")
 
+"""
+Backends qualified for per-region FEM materials (porous regions, region seams with differing
+bulk loss) in coupled solves; the one list behind the coupled cache, the compiled driver's
+refusal and the worker's per-backend `fem_region_material_models` announcement.
+"""
+const PER_REGION_MATERIAL_BACKENDS = (:cpu, :cuda)
+
+"""`"cpu or cuda"`: the qualified backends of `PER_REGION_MATERIAL_BACKENDS`, for messages."""
+per_region_material_backends_text() = join(String.(PER_REGION_MATERIAL_BACKENDS), " or ")
+
 export BoundaryMesh,
     combine_boundary_meshes,
     DP0Space,

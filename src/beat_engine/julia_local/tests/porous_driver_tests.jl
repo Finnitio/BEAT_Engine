@@ -249,6 +249,16 @@ end
     end
 end
 
+@testset "the worker announces porous materials exactly on the backends the driver solves them on" begin
+    backends = worker_backend_availability()
+    for name in ("cpu", "cuda", "rocm", "metal")
+        qualified = Symbol(name) in BeatEngineCore.PER_REGION_MATERIAL_BACKENDS
+        @test haskey(backends[name], "fem_region_material_models") == !qualified
+        qualified || @test backends[name]["fem_region_material_models"] == ["air"]
+    end
+    @test BeatEngineCore.per_region_material_backends_text() == "cpu or cuda"
+end
+
 @testset "coupled FEM-BEM solves accept porous regions on CUDA (fails only for the missing device here)" begin
     message = try
         solve_coupled_workload(porous_tiny_coupled_request("cuda"))

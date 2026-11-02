@@ -2971,9 +2971,10 @@ function solve_request_impl(request; event_mode=false)
     # solve a porous fill unverified (the worker's backend capabilities say the same).
     porous_region_ids = [String(region["id"]) for region in bounded_regions
                          if is_porous(parse_region_material(region["loss_model"], Float64))]
-    isempty(porous_region_ids) || bem_backend in PER_REGION_COUPLED_BACKENDS || error(
+    isempty(porous_region_ids) || bem_backend in BeatEngineCore.PER_REGION_MATERIAL_BACKENDS || error(
         "Porous region materials are not supported on the $(bem_backend) backend in coupled FEM-BEM " *
-        "solves (regions $(join(repr.(porous_region_ids), ", "))); use the cpu or cuda backend.")
+        "solves (regions $(join(repr.(porous_region_ids), ", "))); use the " *
+        "$(BeatEngineCore.per_region_material_backends_text()) backend.")
     symmetry_mode = BeatEngineCore.normalized_symmetry_mode(
         get(solver_options, "symmetry", "off"),
     )
@@ -3004,7 +3005,7 @@ function solve_request_impl(request; event_mode=false)
     # the interior solve: each region's air bulk loss then acts on its own elements. Requests
     # with neither keep the original air operator arithmetic (bit-identical results). ROCm and
     # Metal still scale mass rows per node, so their seams need equal bulk loss.
-    coupled_per_region = bem_backend in PER_REGION_COUPLED_BACKENDS &&
+    coupled_per_region = bem_backend in BeatEngineCore.PER_REGION_MATERIAL_BACKENDS &&
                          (fem_domains.has_porous_regions || !isempty(fem_domains.region_seams))
     coupled_per_region || require_uniform_seam_bulk_loss(fem_domains)
     coupled_fem_regions = coupled_per_region ? (

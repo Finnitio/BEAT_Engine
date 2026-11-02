@@ -227,17 +227,27 @@ def negotiate_submission(info: dict, request: dict, operation: str) -> dict:
         f"phasor convention {convention!r} is not qualified for backend {backend_name!r}.",
     )
     if operation == "solve":
-        # A backend may qualify fewer region materials than the worker parses (porous regions
-        # solve on CPU and CUDA, not yet on ROCm or Metal); it falls back to the worker list.
-        qualified = backend.get("fem_region_material_models", info.get("fem_region_material_models", ["air"]))
+        # A backend may qualify fewer region materials than the worker parses (the worker
+        # announces which, per backend); it falls back to the worker list.
         for region in request["compiled_system"]["regions"]:
             model = region["loss_model"].get("model", "air")
+            if model == "air" or model in _backend_region_material_models(info, backend):
+                continue
+            qualifying = [
+                name
+                for name, candidate in info.get("backends", {}).items()
+                if model in _backend_region_material_models(info, candidate)
+            ]
             _require(
-                model == "air" or model in qualified,
+                False,
                 f"region material model {model!r} (region {region['id']!r}) is not qualified for backend "
-                f"{backend_name!r}; solve porous regions on the cpu or cuda backend.",
+                f"{backend_name!r}; it is qualified on: {', '.join(qualifying) or 'no backend'}.",
             )
     return command
+
+
+def _backend_region_material_models(info: dict, backend: dict) -> list:
+    return backend.get("fem_region_material_models", info.get("fem_region_material_models", ["air"]))
 
 
 def validate_worker_event(event: dict) -> None:

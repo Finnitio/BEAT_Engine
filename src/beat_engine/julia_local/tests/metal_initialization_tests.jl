@@ -55,6 +55,7 @@ using ..AvailabilityProbe: Device
 const CUDA_MODULE = nothing
 const AMDGPU_MODULE = nothing
 const METAL_MODULE = Device
+const PER_REGION_MATERIAL_BACKENDS = (:cpu, :cuda)
 end
 include(joinpath(@__DIR__, "../worker_backend_availability.jl"))
 end

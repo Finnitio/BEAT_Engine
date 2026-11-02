@@ -503,6 +503,18 @@ def test_backend_can_withhold_porous_region_materials(ready, payload, backend):
     negotiate_submission(ready, payload, "solve")
 
 
+def test_withheld_material_names_the_backends_the_worker_announces_for_it(ready, payload):
+    # The suggestion comes from the worker's per-backend announcement, not from a client-side list.
+    ready["backends"]["rocm"] = {"available": True, "fem_region_material_models": ["air"]}
+    ready["backends"]["cuda"] = {"available": True, "fem_region_material_models": ["air"]}
+    enable_coupled_porous_region(payload, "rocm")
+    with pytest.raises(WorkerCompatibilityError, match=r"qualified on: cpu\.$"):
+        negotiate_submission(ready, payload, "solve")
+    ready["backends"]["cuda"] = {"available": True}
+    with pytest.raises(WorkerCompatibilityError, match=r"qualified on: cpu, cuda\.$"):
+        negotiate_submission(ready, payload, "solve")
+
+
 def test_backend_without_material_list_falls_back_to_worker_list(ready, payload):
     ready["backends"]["cuda"] = {"available": True}
     enable_coupled_porous_region(payload, "cuda")

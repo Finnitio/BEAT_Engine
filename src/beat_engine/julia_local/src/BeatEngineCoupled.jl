@@ -37,7 +37,6 @@ export VolumeMesh,
     coupled_fem_dynamic_stiffness,
     coupled_fem_operator_blocks,
     coupled_fem_operator_coefficients,
-    PER_REGION_COUPLED_BACKENDS,
     assemble_boundary_mass_matrix,
     assemble_boundary_tangential_stiffness,
     prepare_thermoviscous_operator,
@@ -1150,13 +1149,6 @@ function coupled_fem_dynamic_stiffness(prepared, omega, sound_speed, density)
 end
 
 """
-Coupled backends whose FEM operator can be formed per region (`fem_regions`): CPU forms it on
-the host, CUDA scatters the same per-region blocks on the device. ROCm and Metal are not
-qualified for porous regions yet.
-"""
-const PER_REGION_COUPLED_BACKENDS = (:cpu, :cuda)
-
-"""
     coupled_fem_operator_blocks(operator::RegionFemOperator)
 
 Frequency-invariant sparse blocks `K_r, M_r` per region (all on the shared air pattern), in the
@@ -1213,9 +1205,11 @@ function prepare_coupled_cache(
     )
     bem_backend in (:cpu, :cuda, :rocm, :metal) ||
         error("Unsupported coupled BEM backend: $bem_backend. Expected :cpu, :cuda, :rocm, or :metal.")
-    isnothing(fem_regions) || bem_backend in PER_REGION_COUPLED_BACKENDS || error(
+    # CPU forms the per-region operator on the host, CUDA scatters its blocks on the device.
+    isnothing(fem_regions) || bem_backend in BeatEngineCore.PER_REGION_MATERIAL_BACKENDS || error(
         "Per-region FEM material operators (porous regions, region seams) are not supported on " *
-        "the $bem_backend backend in coupled solves; use the cpu or cuda backend.",
+        "the $bem_backend backend in coupled solves; use the " *
+        "$(BeatEngineCore.per_region_material_backends_text()) backend.",
     )
     resolve_coupled_bem_assembly(coupled_bem_assembly, bem_backend, false)
     normalized_symmetry = BeatEngineCore.normalized_symmetry_mode(symmetry_mode)

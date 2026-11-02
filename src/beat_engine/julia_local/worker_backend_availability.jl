@@ -20,9 +20,10 @@ function worker_backend_availability()
         end
         backends[name] = Dict{String,Any}("available" => available, "reason" => reason,
             "phasor_conventions" => name == "rocm" ? [NEGATIVE_TIME_PHASOR] : [NEGATIVE_TIME_PHASOR, POSITIVE_TIME_PHASOR])
-        # Porous region materials are qualified on CPU and CUDA only; the others announce air so
-        # clients refuse such requests before submission (the driver refuses them as well).
-        name in ("rocm", "metal") && (backends[name]["fem_region_material_models"] = ["air"])
+        # Backends not qualified for porous region materials announce air only, so clients refuse
+        # such requests before submission (the driver refuses them as well).
+        Symbol(name) in BeatEngineCore.PER_REGION_MATERIAL_BACKENDS ||
+            (backends[name]["fem_region_material_models"] = ["air"])
     end
     return backends
 end
