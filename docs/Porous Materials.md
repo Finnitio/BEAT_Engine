@@ -438,11 +438,9 @@ outside the wall time.
 
 Accuracy against CPU Float64 (`scripts/compare_porous_backends.py`): the radiating porous
 tube (200, 700, 1500 Hz) and the air|porous seam, monolithic and condensed. Float64 differs
-by at most 5.1e-14 (limit 1e-8), Float32 by at most 4.5e-5 (limit 2e-3). The script itself
-currently aborts before this comparison in a CUDA environment: the testset "per-region
-coupled caches" in `porous_coupled_tests.jl` expects the CUDA cache to fail at its first
-device allocation ("Without CUDA.jl ..."), which does not happen when CUDA.jl is loaded and
-functional. The numbers above come from the same file with that one testset removed.
+by at most 5.1e-14 (limit 1e-8), Float32 by at most 4.5e-5 (limit 2e-3). The script passes
+unmodified (exit 0; gated CUDA testset 51/51). Condensed sweeps report
+`fem_symbolic_analysis_reused` false at frequency 1 and true from frequency 2 on.
 
 Machine: NVIDIA GeForce RTX 3080 Ti (12 GiB), driver 617.42 (WDDM), CUDA 13.4 driver API,
 CUDA.jl 6.4.2 with CUDA_Runtime_jll 0.25.0 and CUDSS_jll 0.8.0; AMD Ryzen 9 5900X (12 cores,
