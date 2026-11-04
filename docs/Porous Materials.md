@@ -403,21 +403,51 @@ always solve on CPU, so they need no CUDA run. Windows reports memory as unavail
 `--split-below-m` split writes a new mesh for the layer: on another mesh pick a coordinate
 that leaves only rigid boundaries in the layer (the script stops otherwise).
 
-### CUDA (manual user step, not measured here)
+### CUDA (Windows, measured 2026-11-04)
 
-**Manual step for the user:** this VM has no GPU, so nothing below has been run on CUDA. Fill
-the table in on a Windows CUDA machine with the commands above (`--backend cuda`), and run
-`python scripts/compare_porous_backends.py` for the CUDA accuracy check. Until then CUDA
-support for porous regions and seams is implemented but unmeasured. ROCm is not available to
-the user either, so its air-only path (unchanged from v0.7.0) is not re-measured.
+Commands as above with `--backend cuda`, 3 interleaved runs per configuration, engine
+`d569658` (regression base v0.7.0 `c82bb7a`), Boundary Lab 5fefb98. Coupled, condensed (cuDSS),
+Float32. "Per frequency" is the mean over the 12 frequencies of `assembly_s + solve_s + field_s`,
+the median of the three runs. "vs Air" compares that per-frequency time with the Air row of the
+same mesh. The `compression_driver` rows are not repeated: that workload always solves on CPU.
 
 | Workload | Material | Runs | Wall, median (range) | Per frequency | vs Air | Peak memory |
 |---|---|---|---|---|---|---|
-| `Simple_Sealed` + porous layer | Air / JCA / JCAL / JCA limp | | | | | |
-| `Multi_region_SAWMOD`, stuffed chamber | Air / JCA / JCAL / JCA limp | | | | | |
-| `Multi_region_SAWMOD` regression | v0.7.0 / branch | | | | | |
+| `Simple_Sealed` + porous layer (two regions + seam) | Air | 3 | 20.58 s (20.52–20.61) | 56 ms | (reference) | n/a |
+| | JCA | 3 | 20.64 s (20.60–20.68) | 55 ms | −1.6 % | n/a |
+| | JCAL | 3 | 20.57 s (20.54–20.62) | 52 ms | −6.2 % | n/a |
+| | JCA limp | 3 | 20.53 s (20.46–20.59) | 50 ms | −10.6 % | n/a |
+| `Multi_region_SAWMOD`, stuffed chamber | Air | 3 | 8.61 s (8.02–8.81) | 569 ms | (reference) | n/a |
+| | JCA | 3 | 8.76 s (8.72–8.98) | 557 ms | −2.3 % | n/a |
+| | JCAL | 3 | 8.73 s (7.98–8.82) | 546 ms | −4.0 % | n/a |
+| | JCA limp | 3 | 8.68 s (7.95–8.78) | 551 ms | −3.2 % | n/a |
+| `Multi_region_SAWMOD` regression (air only) | v0.7.0 | 3 | 7.60 s (7.59–7.85) | 499 ms | (reference) | n/a |
+| | branch | 3 | 7.80 s (7.71–9.29) | 503 ms | +0.8 % | n/a |
 
-Machine: GPU, CPU, cores, RAM, driver/CUDA version, Julia version, threads.
+No porous variant is slower than Air per frequency, so the 10 % target holds. The
+negative differences are not speed-ups: the per-run spread of the per-frequency time is
+5–10 % (Simple_Sealed Air 51–56 ms, JCA limp 48–54 ms; SAWMOD Air 505–583 ms). Air-only SAWMOD is within variance of
+v0.7.0: wall +2.6 % on the median, per frequency +0.8 %; one branch run took 9.29 s, the
+other two 7.71 s and 7.80 s. The operator cost (`fem_system_s + fem_matrix_cache_s +
+cache_setup_s`, mean per frequency) is 66 ms for v0.7.0 and 68 ms for the branch on SAWMOD
+Air, 98 ms with JCA. Every run's condensed sweep reported `fem_symbolic_analysis_reused`
+from the second frequency on. The `Simple_Sealed` wall time is dominated by the mesh hashing
+described above, not by the frequency loop. Peak memory is not measured on Windows
+(`unavailable`). The first run of each worker pays about 33 s start-up and 44 s warm-up,
+outside the wall time.
+
+Accuracy against CPU Float64 (`scripts/compare_porous_backends.py`): the radiating porous
+tube (200, 700, 1500 Hz) and the air|porous seam, monolithic and condensed. Float64 differs
+by at most 5.1e-14 (limit 1e-8), Float32 by at most 4.5e-5 (limit 2e-3). The script itself
+currently aborts before this comparison in a CUDA environment: the testset "per-region
+coupled caches" in `porous_coupled_tests.jl` expects the CUDA cache to fail at its first
+device allocation ("Without CUDA.jl ..."), which does not happen when CUDA.jl is loaded and
+functional. The numbers above come from the same file with that one testset removed.
+
+Machine: NVIDIA GeForce RTX 3080 Ti (12 GiB), driver 617.42 (WDDM), CUDA 13.4 driver API,
+CUDA.jl 6.4.2 with CUDA_Runtime_jll 0.25.0 and CUDSS_jll 0.8.0; AMD Ryzen 9 5900X (12 cores,
+24 threads), 64 GiB RAM, Windows 11 Pro; Julia 1.12.7, `--threads=4` for the benchmarks (the
+worker sets BLAS threads to the same count), CPython 3.13.5.
 
 ## Validation
 
