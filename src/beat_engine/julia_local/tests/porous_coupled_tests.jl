@@ -298,14 +298,24 @@ end
     for backend in (:rocm, :metal)
         @test_throws "not supported on the $backend backend" radiating_tube_cache(; porous=true, bem_backend=backend)
     end
-    message = try
-        radiating_tube_cache(; porous=true, bem_backend=:cuda)
-        ""
-    catch exception
-        sprint(showerror, exception)
+    cuda = BeatEngineCore.CUDA_MODULE
+    if cuda !== nothing && cuda.functional()
+        # With a functional CUDA.jl the cache builds and holds the per-region device blocks.
+        cache = radiating_tube_cache(; porous=true, bem_backend=:cuda)
+        @test cache.bem_backend == :cuda
+        @test !isnothing(cache.region_operator)
+        @test length(cache.device_sparse_blocks.fem_operator) ==
+              length(coupled_fem_operator_blocks(cache.region_operator))
+    else
+        message = try
+            radiating_tube_cache(; porous=true, bem_backend=:cuda)
+            ""
+        catch exception
+            sprint(showerror, exception)
+        end
+        # Without CUDA.jl the cache stops at its first device allocation, past the material check.
+        @test occursin("CUDA", message) && !occursin("not supported on the cuda backend", message)
     end
-    # Without CUDA.jl the cache stops at its first device allocation, past the material check.
-    @test occursin("CUDA", message) && !occursin("not supported on the cuda backend", message)
 end
 
 """
